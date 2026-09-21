@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button } from '/assets/scaffold.js';
+import { Telemetry } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('video-blob');
+const SRC = '/media/h264-1080p24.mp4';
+
+const video = document.createElement('video');
+Object.assign(video, { controls: true, playsInline: true });
+stage.append(video);
+
+const t = new Telemetry({ mount: panel, video });
+t.set('phase', 'downloading', 'v-warn');
+
+// The entire file is pulled before playback starts, so anything that goes wrong
+// afterwards is decode or rendering, never delivery.
+const started = performance.now();
+const res = await fetch(SRC);
+const total = Number(res.headers.get('content-length')) || 0;
+const reader = res.body.getReader();
+const chunks = [];
+let got = 0;
+
+for (;;) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  chunks.push(value);
+  got += value.length;
+  if (total) t.set('download', `${((got / total) * 100).toFixed(0)}%`, 'v-warn');
+}
+
+const secs = (performance.now() - started) / 1000;
+const blob = new Blob(chunks, { type: 'video/mp4' });
+video.src = URL.createObjectURL(blob);
+
+t.set('phase', 'buffered in memory', 'v-ok');
+t.set('download', `${(got / 1e6).toFixed(1)} MB in ${secs.toFixed(1)}s`, 'v-ok');
+t.set('throughput', `${((got * 8) / secs / 1e6).toFixed(1)} Mbit/s`);
+t.log(`fetched ${(got / 1e6).toFixed(1)} MB, playing from blob:`, 'good');
+
+button(controls, 'play', () => video.play().catch((e) => t.fail(`play() rejected: ${e.message}`)));
+button(controls, 'restart', () => { video.currentTime = 0; video.play(); });
+
+notes.innerHTML = `
+  <p>Identical decode path to page 01 with delivery taken out of the picture.</p>
+  <p>This is the page that settles the most common argument. If 01 stutters and
+     02 is clean, the client decodes 1080p24 fine and the problem is the link or
+     the server. If 02 stutters too, it is the decoder.</p>
+  <p>Note the cost: the whole file sits in memory, which on a constrained client
+     is its own failure mode worth watching.</p>`;
+</script>
+</body>
+</html>

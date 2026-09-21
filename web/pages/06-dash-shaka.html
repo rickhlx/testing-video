@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button, loadScript } from '/assets/scaffold.js';
+import { Telemetry } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('dash-shaka');
+const SRC = '/media/dash/manifest.mpd';
+
+const video = document.createElement('video');
+Object.assign(video, { controls: true, playsInline: true });
+stage.append(video);
+
+const t = new Telemetry({ mount: panel, video });
+
+await loadScript('/vendor/shaka-player.compiled.js');
+t.set('shaka', shaka.Player.version);
+
+shaka.polyfill.installAll();
+
+if (!shaka.Player.isBrowserSupported()) {
+  t.fail('shaka.Player.isBrowserSupported() is false on this client.');
+  t.set('supported', 'false', 'v-bad');
+} else {
+  t.set('supported', 'true', 'v-ok');
+  const player = new shaka.Player();
+  await player.attach(video);
+
+  player.addEventListener('error', (e) => t.fail(`shaka ${e.detail.code}: ${e.detail.message || ''}`));
+  player.addEventListener('buffering', (e) => t.log(`buffering=${e.buffering}`, e.buffering ? 'err' : ''));
+  player.addEventListener('adaptation', () => {
+    const v = player.getVariantTracks().find((x) => x.active);
+    if (v) t.set('variant', `${v.width}x${v.height} @${(v.bandwidth / 1e6).toFixed(1)}Mb`);
+  });
+
+  try {
+    await player.load(SRC);
+    t.log('manifest loaded', 'good');
+    video.play().catch((e) => t.log(`autoplay blocked: ${e.message}`));
+  } catch (e) {
+    t.fail(`load failed: ${e.code} ${e.message || ''}`);
+  }
+
+  button(controls, 'play', () => video.play());
+  button(controls, 'seek +10s', () => { video.currentTime += 10; });
+}
+
+notes.innerHTML = `
+  <p>The other production path. Same underlying MSE as page 04, different
+     manifest format and a materially different buffering strategy.</p>
+  <p>Worth running alongside hls.js: a client that handles one and not the other
+     usually has a buffer-size or append-window quirk rather than a codec
+     problem.</p>`;
+</script>
+</body>
+</html>

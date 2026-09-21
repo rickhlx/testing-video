@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button, loadScript } from '/assets/scaffold.js';
+import { Telemetry } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('hls-hlsjs');
+const SRC = '/media/hls/master.m3u8';
+
+const video = document.createElement('video');
+Object.assign(video, { controls: true, playsInline: true });
+stage.append(video);
+
+const t = new Telemetry({ mount: panel, video });
+
+await loadScript('/vendor/hls.min.js');
+t.set('hls.js', Hls.version);
+
+if (!Hls.isSupported()) {
+  t.fail('Hls.isSupported() is false: this client has no usable MediaSource.');
+  t.set('supported', 'false', 'v-bad');
+} else {
+  const hls = new Hls({ debug: false });
+  t.set('supported', 'true', 'v-ok');
+
+  hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
+    t.log(`manifest parsed, ${data.levels.length} level(s)`, 'good');
+    video.play().catch((e) => t.log(`autoplay blocked: ${e.message}`));
+  });
+  hls.on(Hls.Events.LEVEL_SWITCHED, (_e, d) => {
+    const l = hls.levels[d.level];
+    t.set('level', `${l.width}x${l.height} @${(l.bitrate / 1e6).toFixed(1)}Mb`);
+  });
+  hls.on(Hls.Events.FRAG_LOADED, (_e, d) => t.set('fragments loaded', d.frag.sn + 1));
+  hls.on(Hls.Events.ERROR, (_e, d) => {
+    // Only fatal errors are worth alarming about; hls.js recovers from plenty.
+    const msg = `${d.type}/${d.details}${d.fatal ? ' (fatal)' : ''}`;
+    d.fatal ? t.fail(msg) : t.log(msg);
+  });
+
+  hls.loadSource(SRC);
+  hls.attachMedia(video);
+
+  button(controls, 'play', () => video.play());
+  button(controls, 'seek +10s', () => { video.currentTime += 10; });
+  button(controls, 'destroy', (b) => { hls.destroy(); b.disabled = true; t.log('hls.destroy()'); });
+}
+
+notes.innerHTML = `
+  <p>The path most production players actually take: HLS parsed and demuxed in
+     JavaScript, then pushed into MSE.</p>
+  <p>Because it rides on the same MSE that page 03 exercises raw, the two
+     together tell you whether a failure is in the transport library or in the
+     browser's buffer.</p>`;
+</script>
+</body>
+</html>

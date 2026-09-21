@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Video test matrix</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div class="wrap">
+  <h1 style="margin:0 0 6px">Video test matrix</h1>
+  <p class="lede">
+    Twelve ways of putting the same 1080p24 clip on screen, each isolating a
+    different layer. Every page reports the same telemetry, so two pages can be
+    compared directly. Run them in order: the first page that misbehaves names
+    the layer at fault.
+  </p>
+
+  <div class="legend">
+    <span><b>Reading the picture.</b> The clip carries a burned-in indicator so
+      drops are visible, not just counted.</span>
+    <span><b>White marker</b> steps one slot per frame and wraps once a second.
+      Smooth sweep is healthy; a skipped slot is a dropped frame.</span>
+    <span><b>Green blocks</b> are the frame number in binary, most significant
+      bit on the left &mdash; readable from a photo of a misbehaving client.</span>
+    <span><b>Red box</b> blinks twice a second as a peripheral cadence check.</span>
+  </div>
+
+  <h2 class="section">the matrix</h2>
+  <div class="matrix" id="matrix"></div>
+
+  <h2 class="section">this client: 1080p24 decode</h2>
+  <table class="caps"><tbody id="codecs"></tbody></table>
+
+  <h2 class="section">this client: features</h2>
+  <table class="caps"><tbody id="features"></tbody></table>
+
+  <h2 class="section">this client: agent</h2>
+  <table class="caps"><tbody id="agent"></tbody></table>
+</div>
+
+<script type="module">
+import { PAGES } from '/assets/pages.js';
+import { probeCapabilities } from '/assets/telemetry.js';
+
+// Page titles contain literal tag names like "<video>", so anything going into
+// innerHTML has to be escaped or the browser builds the element instead.
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+const caps = await probeCapabilities();
+
+// A few pages can be called before they are opened; say so rather than making
+// someone click through to find a blank stage.
+const predicted = {
+  'hls-native':    caps.features['native HLS'],
+  'canvas-worker': 'MediaStreamTrackProcessor' in self && 'OffscreenCanvas' in self,
+  'webgl':         caps.features['WebGL2'],
+  'webcodecs':     caps.features['VideoDecoder (WebCodecs)'] && caps.features['secure context'],
+  'pip':           caps.features['Picture-in-Picture'],
+};
+
+document.getElementById('matrix').innerHTML = PAGES.map((p) => {
+  const v = predicted[p.slug];
+  const verdict = v === undefined ? '<span class="v-dim">&mdash;</span>'
+    : v ? '<span class="v-ok">supported</span>'
+        : '<span class="v-bad">unsupported</span>';
+  return `<a class="card" href="/pages/${p.file}">
+    <span class="n">${p.n}</span>
+    <span><span class="title">${esc(p.title)}</span><br><span class="sub">${esc(p.isolates)}</span></span>
+    <span class="verdict">${verdict}</span>
+  </a>`;
+}).join('');
+
+const cell = (ok, text) => `<td class="val ${ok ? 'v-ok' : 'v-bad'}">${text}</td>`;
+
+document.getElementById('codecs').innerHTML =
+  `<tr><th>codec</th><th>canPlayType</th><th>MSE</th><th>decodes</th><th>smooth @1080p24</th><th>power efficient</th></tr>` +
+  Object.entries(caps.codecs).map(([name, c]) => `<tr>
+      <th>${esc(name)}</th>
+      <td class="val ${c.canPlayType === 'no' ? 'v-bad' : 'v-ok'}">${c.canPlayType}</td>
+      ${cell(c.mseSupported, String(c.mseSupported))}
+      ${cell(c.supported, String(c.supported))}
+      ${cell(c.smooth, String(c.smooth))}
+      ${cell(c.powerEfficient, String(c.powerEfficient))}
+    </tr>`).join('');
+
+document.getElementById('features').innerHTML =
+  Object.entries(caps.features).map(([k, v]) =>
+    `<tr><th>${esc(k)}</th>${cell(v, String(v))}</tr>`).join('');
+
+document.getElementById('agent').innerHTML =
+  Object.entries(caps.agent).map(([k, v]) =>
+    `<tr><th>${esc(k)}</th><td class="val">${esc(v)}</td></tr>`).join('');
+</script>
+</body>
+</html>

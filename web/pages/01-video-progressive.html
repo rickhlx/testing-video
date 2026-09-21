@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button, select } from '/assets/scaffold.js';
+import { Telemetry } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('video-progressive');
+
+const SOURCES = {
+  '/media/h264-1080p24.mp4': 'H.264 High@4.0 (mp4)',
+  '/media/vp9-1080p24.webm': 'VP9 profile 0 (webm)',
+  '/media/av1-1080p24.mp4':  'AV1 Main (mp4)',
+};
+
+// Codec is carried in the URL rather than swapped in place: a fresh load keeps
+// the frame counters and time-to-first-frame honest.
+const src = new URLSearchParams(location.search).get('src') || Object.keys(SOURCES)[0];
+
+const video = document.createElement('video');
+Object.assign(video, { controls: true, playsInline: true, preload: 'auto', src });
+stage.append(video);
+
+const t = new Telemetry({ mount: panel, video });
+t.set('source', src.split('/').pop());
+t.set('canPlayType', video.canPlayType(src.endsWith('.webm') ? 'video/webm' : 'video/mp4') || 'no');
+
+const picker = select(controls, 'codec', SOURCES, (v) => { location.search = `?src=${encodeURIComponent(v)}`; });
+picker.value = src;
+
+button(controls, 'play', () => video.play().catch((e) => t.fail(`play() rejected: ${e.message}`)));
+button(controls, 'seek +10s', () => { video.currentTime = Math.min(video.currentTime + 10, video.duration || 0); });
+button(controls, 'restart', () => { video.currentTime = 0; video.play(); });
+
+notes.innerHTML = `
+  <p>The control case. Everything else in the matrix is measured against this one.</p>
+  <p>If this page is healthy and a later page is not, the fault is in that page's
+     mechanism. If this page is already dropping frames, the client cannot decode
+     1080p24 at all and nothing further down the list will help.</p>
+  <p>Seeking exercises HTTP range requests; watch the server log for <code>range=</code> lines.</p>`;
+</script>
+</body>
+</html>

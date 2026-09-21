@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button } from '/assets/scaffold.js';
+import { Telemetry } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('mse-fmp4');
+const BASE = '/media/hls/';
+
+const video = document.createElement('video');
+Object.assign(video, { controls: true, playsInline: true });
+stage.append(video);
+
+const t = new Telemetry({ mount: panel, video });
+
+const index = await (await fetch(BASE + 'index.json')).json();
+t.set('codec string', index.mimeCodec.replace('video/mp4; codecs=', ''));
+
+const supported = 'MediaSource' in self && MediaSource.isTypeSupported(index.mimeCodec);
+t.set('isTypeSupported', String(supported), supported ? 'v-ok' : 'v-bad');
+if (!supported) {
+  t.fail('MediaSource.isTypeSupported() says no. Nothing below will work on this client.');
+}
+
+const ms = new MediaSource();
+video.src = URL.createObjectURL(ms);
+
+ms.addEventListener('sourceopen', async () => {
+  URL.revokeObjectURL(video.src);
+  let sb;
+  try {
+    sb = ms.addSourceBuffer(index.mimeCodec);
+  } catch (e) {
+    t.fail(`addSourceBuffer failed: ${e.message}`);
+    return;
+  }
+
+  // Appends are serialised on updateend; overlapping them is the classic way to
+  // get an InvalidStateError that looks like a codec problem.
+  const appended = (buf) => new Promise((resolve, reject) => {
+    sb.addEventListener('updateend', resolve, { once: true });
+    sb.addEventListener('error', reject, { once: true });
+    sb.appendBuffer(buf);
+  });
+
+  const fetchSeg = async (name) => new Uint8Array(await (await fetch(BASE + name)).arrayBuffer());
+
+  try {
+    await appended(await fetchSeg(index.init));
+    t.log('init segment appended', 'good');
+
+    for (const [i, name] of index.segments.entries()) {
+      await appended(await fetchSeg(name));
+      t.set('segments appended', `${i + 1} / ${index.segments.length}`);
+      if (i === 0) video.play().catch((e) => t.log(`autoplay blocked: ${e.message}`));
+    }
+    ms.endOfStream();
+    t.log('endOfStream', 'good');
+  } catch (e) {
+    t.fail(`append failed: ${e.message || e.type}`);
+  }
+});
+
+button(controls, 'play', () => video.play().catch((e) => t.fail(`play() rejected: ${e.message}`)));
+button(controls, 'reload', () => location.reload());
+
+notes.innerHTML = `
+  <p>MSE driven directly, with no player library in the way. The segments are the
+     same CMAF fragments the HLS page uses, so a difference between this page and
+     page 04 is hls.js, not the media.</p>
+  <p>When hls.js and shaka both misbehave on a client, come here first: if raw
+     appends work, the fault is in the library's buffering policy, not in MSE.</p>`;
+</script>
+</body>
+</html>

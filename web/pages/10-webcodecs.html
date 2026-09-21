@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button, loadScript } from '/assets/scaffold.js';
+import { Telemetry, Rate, rateClass } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('webcodecs');
+const SRC = '/media/h264-1080p24.mp4';
+const FPS = 24;
+
+const canvas = document.createElement('canvas');
+canvas.width = 1920; canvas.height = 1080;
+const ctx = canvas.getContext('2d', { alpha: false });
+stage.append(canvas);
+
+// No <video> element anywhere on this page, so telemetry counts our paints.
+const t = new Telemetry({ mount: panel, label: 'painted' });
+
+t.set('secure context', String(self.isSecureContext), self.isSecureContext ? 'v-ok' : 'v-bad');
+if (!('VideoDecoder' in self)) {
+  t.fail('No VideoDecoder on this client. WebCodecs is unavailable.');
+  if (!self.isSecureContext) t.fail('Not a secure context: serve with -tls, or use localhost.');
+} else {
+  await loadScript('/vendor/mp4box.all.min.js');
+
+  const paintRate = new Rate();
+  let decoded = 0, painted = 0;
+
+  // Decoder output is not paced; frames arrive as fast as the hardware manages.
+  // Holding them in a queue and presenting on the rAF clock is what makes this
+  // a fair comparison against the <video> pages.
+  const queue = [];
+  let startedAt = null;
+
+  const present = () => {
+    if (startedAt === null && queue.length) startedAt = performance.now();
+    const elapsed = startedAt === null ? 0 : (performance.now() - startedAt) / 1000;
+
+    let frame = null;
+    while (queue.length && queue[0].timestamp / 1e6 <= elapsed) {
+      // Drop anything already late rather than falling progressively behind.
+      if (frame) frame.close();
+      frame = queue.shift();
+    }
+    if (frame) {
+      ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+      frame.close();
+      painted++;
+      t.markFrame();
+      const fps = paintRate.sample(painted);
+      t.set('present fps', fps === null ? '--' : fps.toFixed(1), rateClass(fps));
+    }
+    t.set('queued frames', queue.length, queue.length > FPS ? 'v-warn' : 'v-ok');
+    requestAnimationFrame(present);
+  };
+  requestAnimationFrame(present);
+
+  const decoder = new VideoDecoder({
+    output: (frame) => { decoded++; t.set('frames decoded', decoded); queue.push(frame); },
+    error: (e) => t.fail(`decoder error: ${e.message}`),
+  });
+
+  // The decoder needs the avcC box verbatim; mp4box gives us the parsed tree
+  // but it has to be re-serialised, minus the 8-byte box header.
+  const description = (file, track) => {
+    const trak = file.getTrackById(track.id);
+    for (const entry of trak.mdia.minf.stbl.stsd.entries) {
+      const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
+      if (!box) continue;
+      const stream = new MP4Box.DataStream(undefined, 0, MP4Box.DataStream.BIG_ENDIAN);
+      box.write(stream);
+      return new Uint8Array(stream.buffer, 8);
+    }
+    return undefined;
+  };
+
+  const file = MP4Box.createFile();
+
+  file.onError = (e) => t.fail(`demux error: ${e}`);
+
+  file.onReady = async (info) => {
+    const track = info.videoTracks[0];
+    const config = {
+      codec: track.codec,
+      codedWidth: track.video.width,
+      codedHeight: track.video.height,
+      description: description(file, track),
+    };
+    t.set('codec', track.codec);
+    t.set('coded size', `${track.video.width}x${track.video.height}`);
+
+    const support = await VideoDecoder.isConfigSupported(config);
+    t.set('isConfigSupported', String(support.supported), support.supported ? 'v-ok' : 'v-bad');
+    if (!support.supported) { t.fail('Decoder rejected the configuration.'); return; }
+
+    decoder.configure(config);
+    t.log(`decoder configured for ${track.codec}`, 'good');
+    file.setExtractionOptions(track.id, null, { nbSamples: 24 });
+    file.start();
+  };
+
+  file.onSamples = (_id, _user, samples) => {
+    for (const s of samples) {
+      decoder.decode(new EncodedVideoChunk({
+        type: s.is_sync ? 'key' : 'delta',
+        timestamp: (s.cts * 1e6) / s.timescale,
+        duration: (s.duration * 1e6) / s.timescale,
+        data: s.data,
+      }));
+    }
+    t.set('decode queue', decoder.decodeQueueSize);
+  };
+
+  const buf = await (await fetch(SRC)).arrayBuffer();
+  buf.fileStart = 0;
+  file.appendBuffer(buf);
+  file.flush();
+  t.log(`demuxing ${(buf.byteLength / 1e6).toFixed(1)} MB`, 'good');
+}
+
+button(controls, 'reload', () => location.reload());
+
+notes.innerHTML = `
+  <p>The decoder addressed directly. mp4box.js demuxes the file into encoded
+     chunks, <code>VideoDecoder</code> turns them into frames, and the frames are
+     presented on the rAF clock. There is no <code>&lt;video&gt;</code> element on
+     this page at all.</p>
+  <p>Needs a secure context, so over the LAN this page only works under
+     <code>-tls</code>. A client that plays page 01 but fails here has hardware
+     decode wired to the media pipeline only, not exposed to WebCodecs.</p>`;
+</script>
+</body>
+</html>

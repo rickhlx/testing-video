@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button } from '/assets/scaffold.js';
+import { Telemetry } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('css-composited');
+const SRC = '/media/h264-1080p24.mp4';
+
+const video = document.createElement('video');
+Object.assign(video, { src: SRC, controls: true, playsInline: true, loop: true, muted: true });
+stage.append(video);
+
+const t = new Telemetry({ mount: panel, video });
+
+// Each effect is applied on its own so a client that tanks on exactly one of
+// them names the culprit, instead of producing a single "CSS is slow" verdict.
+const EFFECTS = {
+  'rotate 3d':   'transform: perspective(1200px) rotateY(14deg) rotateX(4deg);',
+  'scale 1.15':  'transform: scale(1.15);',
+  'blur 6px':    'filter: blur(6px);',
+  'saturate 3':  'filter: saturate(3) contrast(1.3);',
+  'opacity .6':  'opacity: .6;',
+  'border-radius': 'border-radius: 48px; overflow: hidden;',
+  'mix-blend':   'mix-blend-mode: screen;',
+  'clip-path':   'clip-path: polygon(6% 0, 100% 0, 94% 100%, 0 100%);',
+};
+
+const active = new Set();
+
+const apply = () => {
+  video.style.cssText = [...active].map((k) => EFFECTS[k]).join(' ');
+  t.set('effects', active.size ? [...active].join(', ') : 'none',
+    active.size ? 'v-warn' : 'v-ok');
+};
+
+for (const name of Object.keys(EFFECTS)) {
+  button(controls, name, (b) => {
+    active.has(name) ? active.delete(name) : active.add(name);
+    b.style.borderColor = active.has(name) ? 'var(--accent)' : '';
+    b.style.color = active.has(name) ? 'var(--accent)' : '';
+    apply();
+    t.log(`${active.has(name) ? 'on' : 'off'}: ${name}`);
+  });
+}
+button(controls, 'clear all', () => {
+  active.clear();
+  apply();
+  for (const b of controls.querySelectorAll('button')) { b.style.borderColor = ''; b.style.color = ''; }
+});
+
+apply();
+video.play().catch((e) => t.log(`autoplay blocked: ${e.message}; press play`));
+
+notes.innerHTML = `
+  <p>A plain progressive video with CSS applied on top. Toggle effects one at a
+     time and watch <code>frames dropped</code>.</p>
+  <p>An untouched video can usually be handed to a hardware overlay plane and
+     never composited by the browser at all. Most of these effects revoke that:
+     the frame has to come back into the compositor, get processed, and be blended
+     with the page. On desktop that is free. On an embedded client it is often the
+     entire difference between smooth and unwatchable, which makes this page the
+     one that most often explains a field report.</p>`;
+</script>
+</body>
+</html>

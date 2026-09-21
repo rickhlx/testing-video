@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button } from '/assets/scaffold.js';
+import { Telemetry } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('hls-native');
+const SRC = '/media/hls/master.m3u8';
+
+const video = document.createElement('video');
+Object.assign(video, { controls: true, playsInline: true });
+stage.append(video);
+
+const t = new Telemetry({ mount: panel, video });
+
+// An empty string means "no"; browsers answer "maybe" or "probably" otherwise.
+const verdict = video.canPlayType('application/vnd.apple.mpegurl');
+t.set('canPlayType', verdict || 'no (empty string)', verdict ? 'v-ok' : 'v-bad');
+
+if (!verdict) {
+  t.log('No native HLS on this client. Loading anyway so the failure is on record.', 'err');
+}
+
+video.src = SRC;
+video.play().catch((e) => t.log(`autoplay blocked: ${e.message}`));
+
+button(controls, 'play', () => video.play().catch((e) => t.fail(`play() rejected: ${e.message}`)));
+button(controls, 'reload', () => location.reload());
+
+notes.innerHTML = `
+  <p>The playlist handed straight to <code>src</code>, with no library involved.</p>
+  <p>This is the sharpest client discriminator in the matrix. Chrome on Android
+     and most WebViews play it; desktop Chrome generally does not, and fails with
+     <code>MEDIA_ERR_SRC_NOT_SUPPORTED</code>. A failure here is a result, not a
+     bug &mdash; it is what tells you which client you have.</p>
+  <p>Watch <code>canPlayType</code> against what actually happens. Some builds
+     answer <code>maybe</code> or <code>probably</code> and then fail to play,
+     which is worth knowing before you branch on that value in production code.</p>`;
+</script>
+</body>
+</html>

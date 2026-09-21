@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button } from '/assets/scaffold.js';
+import { Telemetry, Rate, rateClass } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('canvas-2d');
+const SRC = '/media/h264-1080p24.mp4';
+
+const canvas = document.createElement('canvas');
+canvas.width = 1920; canvas.height = 1080;
+const ctx = canvas.getContext('2d', { alpha: false });
+stage.append(canvas);
+
+// The video still decodes; it is simply never composited. Keeping it in the
+// DOM (rather than detached) is what keeps Chromium's decoder on the fast path.
+const video = document.createElement('video');
+Object.assign(video, { src: SRC, muted: true, playsInline: true, loop: true });
+video.style.display = 'none';
+stage.append(video);
+
+const t = new Telemetry({ mount: panel, video });
+const paintRate = new Rate();
+let painted = 0, drawMsTotal = 0;
+
+const paint = () => {
+  const t0 = performance.now();
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  drawMsTotal += performance.now() - t0;
+  painted++;
+
+  const fps = paintRate.sample(painted);
+  t.set('paint fps', fps === null ? '--' : fps.toFixed(1), rateClass(fps));
+  t.set('frames painted', painted);
+  // At 24fps there is 41.7ms of headroom per frame; drawImage eating a large
+  // share of that is the signal this page exists to produce.
+  t.set('avg drawImage', `${(drawMsTotal / painted).toFixed(2)} ms`,
+    drawMsTotal / painted < 8 ? 'v-ok' : drawMsTotal / painted < 20 ? 'v-warn' : 'v-bad');
+
+  video.requestVideoFrameCallback(paint);
+};
+
+if ('requestVideoFrameCallback' in video) {
+  video.requestVideoFrameCallback(paint);
+} else {
+  t.fail('No requestVideoFrameCallback; falling back to rAF, which will tear.');
+  const loop = () => { paint(); requestAnimationFrame(loop); };
+  requestAnimationFrame(loop);
+}
+
+video.play().catch((e) => t.log(`autoplay blocked: ${e.message}; press play`));
+button(controls, 'play', () => video.play());
+button(controls, 'pause', () => video.pause());
+
+notes.innerHTML = `
+  <p>Every frame is copied out of the decoder and blitted into a 2D canvas on the
+     main thread. Compare <code>paint fps</code> here against page 01.</p>
+  <p>This is usually the first page to fail on a weak client, because it gives up
+     the hardware overlay and pays a full 1920&times;1080 copy per frame. If it
+     holds 24 but page 08 is faster, the main thread is your bottleneck.</p>`;
+</script>
+</body>
+</html>

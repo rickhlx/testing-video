@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button } from '/assets/scaffold.js';
+import { Telemetry } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('pip');
+const SRC = '/media/h264-1080p24.mp4';
+
+const video = document.createElement('video');
+Object.assign(video, { src: SRC, controls: true, playsInline: true, loop: true, muted: true });
+stage.append(video);
+
+const t = new Telemetry({ mount: panel, video });
+
+const haveElementPiP = !!document.pictureInPictureEnabled;
+const haveDocPiP = 'documentPictureInPicture' in self;
+t.set('element PiP', String(haveElementPiP), haveElementPiP ? 'v-ok' : 'v-bad');
+t.set('document PiP', String(haveDocPiP), haveDocPiP ? 'v-ok' : 'v-bad');
+t.set('secure context', String(self.isSecureContext), self.isSecureContext ? 'v-ok' : 'v-warn');
+
+video.addEventListener('enterpictureinpicture', (e) => {
+  t.log(`entered PiP at ${e.pictureInPictureWindow.width}x${e.pictureInPictureWindow.height}`, 'good');
+  t.set('PiP state', 'active', 'v-ok');
+});
+video.addEventListener('leavepictureinpicture', () => {
+  t.log('left PiP');
+  t.set('PiP state', 'inactive', 'v-dim');
+});
+
+button(controls, 'play', () => video.play());
+
+const pipBtn = button(controls, 'toggle element PiP', async () => {
+  try {
+    if (document.pictureInPictureElement) await document.exitPictureInPicture();
+    else await video.requestPictureInPicture();
+  } catch (e) {
+    t.fail(`requestPictureInPicture failed: ${e.name}: ${e.message}`);
+  }
+});
+pipBtn.disabled = !haveElementPiP;
+
+const docBtn = button(controls, 'open document PiP', async () => {
+  try {
+    const win = await documentPictureInPicture.requestWindow({ width: 640, height: 360 });
+    win.document.body.style.cssText = 'margin:0;background:#000';
+    // Moving the element keeps the same decoder and the same telemetry object.
+    win.document.body.append(video);
+    win.addEventListener('pagehide', () => { stage.prepend(video); t.log('document PiP closed'); });
+    t.log('document PiP window opened', 'good');
+  } catch (e) {
+    t.fail(`requestWindow failed: ${e.name}: ${e.message}`);
+  }
+});
+docBtn.disabled = !haveDocPiP;
+
+video.play().catch((e) => t.log(`autoplay blocked: ${e.message}; press play`));
+
+notes.innerHTML = `
+  <p>Playback moved onto a compositing surface outside the page. Both variants are
+     here: element PiP hands the browser the video, while document PiP gives you a
+     real window and the element is re-parented into it.</p>
+  <p>Telemetry keeps reading the same element throughout, so the frame counters
+     carry across the transition &mdash; which is exactly where some clients start
+     dropping. Both calls need a user gesture; document PiP additionally needs a
+     secure context.</p>`;
+</script>
+</body>
+</html>

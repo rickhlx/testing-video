@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button } from '/assets/scaffold.js';
+import { Telemetry, Rate, rateClass } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('canvas-worker');
+const SRC = '/media/h264-1080p24.mp4';
+
+const canvas = document.createElement('canvas');
+canvas.width = 1920; canvas.height = 1080;
+stage.append(canvas);
+
+const video = document.createElement('video');
+Object.assign(video, { src: SRC, muted: true, playsInline: true, loop: true });
+video.style.display = 'none';
+stage.append(video);
+
+const t = new Telemetry({ mount: panel, video });
+
+const haveProcessor = 'MediaStreamTrackProcessor' in self;
+const haveOffscreen = 'transferControlToOffscreen' in canvas;
+t.set('MediaStreamTrackProcessor', String(haveProcessor), haveProcessor ? 'v-ok' : 'v-bad');
+t.set('OffscreenCanvas', String(haveOffscreen), haveOffscreen ? 'v-ok' : 'v-bad');
+
+if (!haveProcessor || !haveOffscreen) {
+  t.fail('This client cannot move frames to a worker; page 07 is the comparable test.');
+} else {
+  await video.play().catch((e) => t.log(`autoplay blocked: ${e.message}; press play`));
+
+  // captureStream needs the element to have started, otherwise the track has no
+  // settings yet and the processor yields nothing.
+  const [track] = video.captureStream().getVideoTracks();
+  t.set('track', `${track.getSettings().width}x${track.getSettings().height}`);
+
+  const readable = new MediaStreamTrackProcessor({ track }).readable;
+  const offscreen = canvas.transferControlToOffscreen();
+  const worker = new Worker('/assets/canvas-worker.js', { type: 'module' });
+
+  const paintRate = new Rate();
+  worker.onmessage = ({ data }) => {
+    const fps = paintRate.sample(data.painted);
+    t.set('worker paint fps', fps === null ? '--' : fps.toFixed(1), rateClass(fps));
+    t.set('frames painted', data.painted);
+    t.set('avg drawImage', `${data.avgDrawMs.toFixed(2)} ms`,
+      data.avgDrawMs < 8 ? 'v-ok' : data.avgDrawMs < 20 ? 'v-warn' : 'v-bad');
+    if (data.done) t.log('worker stream ended');
+  };
+  worker.onerror = (e) => t.fail(`worker error: ${e.message}`);
+  worker.postMessage({ canvas: offscreen, readable }, [offscreen, readable]);
+  t.log('offscreen canvas and frame stream transferred to worker', 'good');
+}
+
+button(controls, 'play', () => video.play());
+button(controls, 'pause', () => video.pause());
+
+notes.innerHTML = `
+  <p>The same per-frame copy as page 07, moved into a worker. Frames reach it as a
+     transferred stream of <code>VideoFrame</code>s, so the main thread does no
+     per-frame work.</p>
+  <p>Read it strictly against 07. Faster here means the main thread was the
+     constraint and the fix is architectural. The same speed means the copy itself
+     is the cost and a worker will not save you.</p>`;
+</script>
+</body>
+</html>
