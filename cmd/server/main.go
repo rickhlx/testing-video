@@ -25,7 +25,7 @@ import (
 
 func main() {
 	var (
-		addr    = flag.String("addr", ":8080", "listen address")
+		addr    = flag.String("addr", defaultAddr(), "listen address; defaults to :$PORT when set, else :8080")
 		webDir  = flag.String("web", "web", "directory of pages and assets")
 		mediaIr = flag.String("media", "media", "directory of generated media")
 		useTLS  = flag.Bool("tls", false, "serve HTTPS with a self-signed cert (needed for WebCodecs/PiP on non-localhost clients)")
@@ -36,6 +36,10 @@ func main() {
 	flag.Parse()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("ok\n"))
+	})
 	mux.Handle("/media/", http.StripPrefix("/media/", mediafs.Handler(*mediaIr, *cache)))
 	mux.Handle("/", mediafs.Handler(*webDir, *cache))
 	mux.HandleFunc("/api/media", mediaIndex(*mediaIr))
@@ -72,6 +76,15 @@ func main() {
 	}
 }
 
+// defaultAddr honours the PORT variable that platform hosts inject, so the same
+// binary runs locally and on a PaaS without a different start command.
+func defaultAddr() string {
+	if p := os.Getenv("PORT"); p != "" {
+		return ":" + p
+	}
+	return ":8080"
+}
+
 func printBanner(scheme, addr string, delay time.Duration, kbps int, useTLS bool) {
 	port := addr
 	if i := strings.LastIndex(addr, ":"); i >= 0 {
@@ -84,7 +97,8 @@ func printBanner(scheme, addr string, delay time.Duration, kbps int, useTLS bool
 	}
 	if !useTLS {
 		fmt.Printf("\n  note: WebCodecs, Document PiP and EME need a secure context.\n")
-		fmt.Printf("        localhost is exempt; remote clients are not. Use -tls for those.\n")
+		fmt.Printf("        localhost is exempt; remote clients are not. Use -tls for those,\n")
+		fmt.Printf("        or front this with a TLS-terminating proxy and ignore this.\n")
 	}
 	if delay > 0 || kbps > 0 {
 		fmt.Printf("\n  impairment: delay=%s cap=%dkbps\n", delay, kbps)
