@@ -41,6 +41,10 @@ func main() {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.Handle("/media/", http.StripPrefix("/media/", mediafs.Handler(*mediaIr, *cache)))
+	// Same media bytes, served as application/octet-stream so nothing on the
+	// wire declares them video. Pages that re-wrap the bytes client-side pull
+	// from here to test a link that classifies traffic by content type or URL.
+	mux.Handle("/raw/", http.StripPrefix("/raw/", mediafs.RawHandler(*mediaIr, *cache)))
 	mux.Handle("/", mediafs.Handler(*webDir, *cache))
 	mux.HandleFunc("/api/media", mediaIndex(*mediaIr))
 

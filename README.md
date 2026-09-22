@@ -33,10 +33,41 @@ It needs `ffmpeg` with `libx264`, `libvpx-vp9` and `libsvtav1`.
 | 10 | WebCodecs `VideoDecoder` | The decoder with no `<video>` element at all |
 | 11 | CSS-composited video | Effects that force video off the hardware overlay |
 | 12 | Picture-in-Picture | A separate compositing surface |
+| 13 | Disguised bytes into `<video>` | A link that classifies traffic by type, not by decode |
+| 14 | Still-frame sequence on canvas | Whether anything downstream of decode is even a video |
 
 Excluded deliberately, because none of them carries 1080p24: animated GIF, APNG,
 animated WebP, animated AVIF, MJPEG in `<img>`, SVG `foreignObject`, and data
 URIs.
+
+## Red-team paths
+
+Pages 13 and 14 exist to answer a different question than the diagnostic dozen:
+if something upstream drops frames on purpose when it recognises video, where
+does that recognition actually live? They carry the same clip and the same
+burned-in indicator, so a bypass is visible and counted exactly as everywhere
+else, and each probes one place the recognition could sit.
+
+- **13 disguises the bytes on the wire.** It is the same H.264 file as page 01,
+  but pulled from `/raw`, which answers `application/octet-stream` with no media
+  extension in the URL. Only once the whole body is in memory is it re-declared
+  `video/mp4` as a Blob and handed to a `<video>`. It still uses the native
+  decode path, so anything reading the decoded pipeline still bites here; a
+  difference from page 01 instead points at something classifying the *traffic*
+  by URL, MIME or response shape.
+- **14 removes the video pipeline entirely.** The clip is served as individual
+  still images and blitted to a canvas on a 24fps clock. There is no `<video>`,
+  no `VideoDecoder` and no MSE on the page, so a control that hooks the
+  recognised media pipeline has nothing to hook. If this holds 24 while the
+  video pages drop, the frames are being taken inside that pipeline. Fetching
+  runs on its own timer, decoupled from the paint clock, so a slow link starves
+  the buffer honestly rather than the throttled rAF starving it artificially.
+
+`/raw` serves the same files as `/media` with the same range support, only ever
+labelled `application/octet-stream`. The still frames are generated alongside the
+rest of the media (webp where ffmpeg has it, mjpeg otherwise) and add roughly
+their own clip's worth of egress — about 150 MB at the default 60s, so lower
+`DUR` if that matters for a fleet.
 
 ## How to run an investigation
 

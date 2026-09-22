@@ -21,6 +21,10 @@ var types = map[string]string{
 	".webm": "video/webm",
 	".ts":   "video/mp2t",
 	".vtt":  "text/vtt",
+	".webp": "image/webp",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".png":  "image/png",
 	".js":   "text/javascript; charset=utf-8",
 	".css":  "text/css; charset=utf-8",
 	".html": "text/html; charset=utf-8",
@@ -42,12 +46,30 @@ func Handler(dir string, cache bool) http.Handler {
 		if typ, ok := types[filepath.Ext(r.URL.Path)]; ok {
 			w.Header().Set("Content-Type", typ)
 		}
-		if cache {
-			w.Header().Set("Cache-Control", "public, max-age=3600")
-		} else {
-			// Default off: a cached segment makes the next measurement a lie.
-			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
-		}
+		setCache(w, cache)
 		fs.ServeHTTP(w, r)
 	})
+}
+
+// RawHandler serves the same bytes as Handler but labels every response
+// application/octet-stream, no matter the extension. It exists so a client can
+// pull a media file without the wire ever announcing it as video: same range
+// support, same file, a content type that says nothing. The client is expected
+// to re-wrap the bytes (a typed Blob, WebCodecs, MSE) once they arrive.
+func RawHandler(dir string, cache bool) http.Handler {
+	fs := http.FileServer(http.Dir(dir))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		setCache(w, cache)
+		fs.ServeHTTP(w, r)
+	})
+}
+
+func setCache(w http.ResponseWriter, cache bool) {
+	if cache {
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+	} else {
+		// Default off: a cached segment makes the next measurement a lie.
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	}
 }

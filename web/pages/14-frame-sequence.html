@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button } from '/assets/scaffold.js';
+import { Telemetry, Rate, rateClass } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('frame-sequence');
+
+// The clip as individual still images, blitted to a canvas on a fixed 24fps
+// clock. There is no <video>, no VideoDecoder and no MediaSource on this page:
+// the browser's media pipeline is never engaged, so a frame-drop control that
+// hooks that pipeline has nothing to act on. Any drop you see here is this
+// page's own doing -- images that did not arrive in time -- and the burned-in
+// indicator shows it exactly as the video pages do.
+const DIR = '/media/frames';
+const FPS = 24;
+const LEAD = 48; // frames to keep fetched ahead of the clock (~2s)
+
+const canvas = document.createElement('canvas');
+canvas.width = 1920; canvas.height = 1080;
+const ctx = canvas.getContext('2d', { alpha: false });
+stage.append(canvas);
+
+const t = new Telemetry({ mount: panel, label: 'painted' });
+const paintRate = new Rate();
+
+let manifest, urlFor, decoded = 0, painted = 0, lastDrawn = -1, playing = false, startedAt = null;
+const bitmaps = new Map(); // index -> ImageBitmap, a sliding window
+let fetchCursor = 1, bytes = 0, inflight = 0;
+
+const pad = (n, w) => String(n).padStart(w, '0');
+
+try {
+  manifest = await (await fetch(`${DIR}/index.json`)).json();
+  const m = manifest.pattern.match(/%0(\d+)d/);
+  const width = m ? Number(m[1]) : 5;
+  urlFor = (i) => `${DIR}/` + manifest.pattern.replace(/%0\d+d/, pad(i, width));
+  fetchCursor = manifest.start;
+  t.set('frames total', manifest.count);
+  t.set('source', manifest.pattern);
+  t.log(`manifest: ${manifest.count} frames @ ${manifest.fps}fps`, 'good');
+} catch (e) {
+  t.fail(`no frame manifest: ${e.message}. Rebuild media, then reload.`);
+}
+
+// Keep LEAD frames ahead of whatever the clock is about to want. Fetch as a
+// Blob, decode to an ImageBitmap off the main thread, and hold it until drawn.
+async function pump(target) {
+  const last = manifest.start + manifest.count - 1;
+  while (manifest && fetchCursor <= last && fetchCursor <= target + LEAD && inflight < 6) {
+    const i = fetchCursor++;
+    inflight++;
+    (async () => {
+      try {
+        const blob = await (await fetch(urlFor(i))).blob();
+        bytes += blob.size;
+        bitmaps.set(i, await createImageBitmap(blob));
+        decoded++;
+      } catch (e) {
+        t.fail(`frame ${i}: ${e.message}`);
+      } finally {
+        inflight--;
+      }
+    })();
+  }
+}
+
+function present(now) {
+  if (playing && manifest) {
+    if (startedAt === null && bitmaps.has(manifest.start)) startedAt = now;
+    const elapsed = startedAt === null ? 0 : (now - startedAt) / 1000;
+    const want = manifest.start + Math.floor(elapsed * FPS);
+    const capped = Math.min(want, manifest.start + manifest.count - 1);
+
+    pump(capped);
+
+    if (capped > lastDrawn) {
+      const bmp = bitmaps.get(capped);
+      if (bmp) {
+        ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+        painted++;
+        t.markFrame();
+        // Free everything we have already passed, so memory stays bounded.
+        for (const [i, b] of bitmaps) {
+          if (i <= capped) { b.close(); bitmaps.delete(i); }
+        }
+        lastDrawn = capped;
+        const fps = paintRate.sample(painted);
+        t.set('present fps', fps === null ? '--' : fps.toFixed(1), rateClass(fps));
+      } else {
+        // The clock moved on but the image is not here yet: a real drop, and
+        // the indicator will show a skipped slot on the next frame that lands.
+        t.set('starved at', capped, 'v-bad');
+      }
+    }
+
+    t.set('buffered ahead', Math.max(0, fetchCursor - 1 - capped), 'v-ok');
+    t.set('frames decoded', decoded);
+    if (bytes) t.set('images downloaded', `${(bytes / 1e6).toFixed(1)} MB`);
+    if (capped >= manifest.start + manifest.count - 1) { playing = false; t.log('ended', 'good'); }
+  }
+  requestAnimationFrame(present);
+}
+requestAnimationFrame(present);
+
+// Buffering runs on its own clock, not the paint loop's. requestAnimationFrame
+// is throttled hard in a backgrounded tab, and the fetch pipeline must not be
+// dragged down with it: keep LEAD frames ahead of whatever was last drawn,
+// independently of how often the canvas actually repaints.
+setInterval(() => { if (playing && manifest) pump(lastDrawn + 1); }, 100);
+
+// A run owns all of its buffer state, so restarting has to rewind the fetch
+// cursor and drop what is held -- otherwise the clock waits on a first frame
+// that was already consumed and closed, and presentation deadlocks while decode
+// races ahead.
+function reset() {
+  for (const b of bitmaps.values()) b.close();
+  bitmaps.clear();
+  fetchCursor = manifest.start;
+  decoded = 0; painted = 0; bytes = 0;
+  lastDrawn = manifest.start - 1;
+  startedAt = null;
+  paintRate.samples = [];
+}
+
+const start = () => {
+  if (!manifest || playing) return;
+  reset();
+  playing = true;
+  pump(manifest.start);
+};
+button(controls, 'play', start);
+button(controls, 'pause', () => { playing = false; });
+button(controls, 'restart', () => { playing = false; start(); });
+start();
+
+notes.innerHTML = `
+  <p>Every frame arrives as a still image, is decoded to an
+     <code>ImageBitmap</code>, and is drawn to a 2D canvas on a 24fps clock. No
+     <code>&lt;video&gt;</code>, no <code>VideoDecoder</code>, no MSE: nothing on
+     this page is a media element, so there is no video pipeline to intercept.</p>
+  <p>If this page holds 24 while the video pages drop, the frames are being taken
+     inside the media pipeline, not on the link or in raw decode. The cost moves
+     to image decode and to keeping <code>${LEAD}</code> frames fetched ahead; a
+     slow link starves the buffer and shows the same skipped slots the video
+     pages would.</p>`;
+</script>
+</body>
+</html>

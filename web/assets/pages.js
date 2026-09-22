@@ -37,4 +37,10 @@ export const PAGES = [
   { n: '12', slug: 'pip', file: '12-pip.html',
     title: 'Picture-in-Picture',
     isolates: 'Playback on a separate compositing surface, outside the page.' },
+  { n: '13', slug: 'disguised-blob', file: '13-disguised-blob.html',
+    title: 'Disguised bytes into <video>',
+    isolates: 'Same file as 01, served as octet-stream and re-wrapped client-side. Tests a link that classifies by type.' },
+  { n: '14', slug: 'frame-sequence', file: '14-frame-sequence.html',
+    title: 'Still-frame sequence on canvas',
+    isolates: 'The clip as images blitted at 24fps. No video element, decoder or MSE: no media pipeline to intercept.' },
 ];
