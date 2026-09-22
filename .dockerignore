@@ -1,0 +1,8 @@
+.git
+.gitignore
+.claude
+bin
+# Generated inside the image by the media stage; never shipped from the host.
+media
+*.md
+Makefile

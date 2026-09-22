@@ -55,12 +55,31 @@ if [ ! -f "$OUT/vp9-1080p24.webm" ]; then
 fi
 
 # --------------------------------------------------------------------- av1 mp4
+# Which AV1 encoder exists depends entirely on how ffmpeg was built: Homebrew
+# ships SVT-AV1, Debian ships libaom. Pick whichever is here rather than making
+# the build depend on a particular ffmpeg.
+has_encoder() { ffmpeg -hide_banner -encoders 2>/dev/null | grep -q " $1 "; }
+
 if [ ! -f "$OUT/av1-1080p24.mp4" ]; then
-  say "av1 mp4 (svt-av1)"
-  ffmpeg -hide_banner -loglevel error -y -i "$OUT/source.mp4" \
-    -c:v libsvtav1 -preset 8 -crf 34 -g 48 -pix_fmt yuv420p \
-    -c:a aac -b:a 128k -movflags +faststart \
-    "$OUT/av1-1080p24.mp4"
+  if has_encoder libsvtav1; then
+    say "av1 mp4 (svt-av1)"
+    av1_args="-c:v libsvtav1 -preset 8 -crf 34"
+  elif has_encoder libaom-av1; then
+    # libaom is markedly slower, so the speed knob is pushed further.
+    say "av1 mp4 (libaom)"
+    av1_args="-c:v libaom-av1 -crf 34 -b:v 0 -cpu-used 8 -row-mt 1"
+  else
+    say "av1 mp4 SKIPPED: this ffmpeg has neither libsvtav1 nor libaom-av1"
+    av1_args=""
+  fi
+
+  if [ -n "$av1_args" ]; then
+    # shellcheck disable=SC2086
+    ffmpeg -hide_banner -loglevel error -y -i "$OUT/source.mp4" \
+      $av1_args -g 48 -pix_fmt yuv420p \
+      -c:a aac -b:a 128k -movflags +faststart \
+      "$OUT/av1-1080p24.mp4"
+  fi
 fi
 
 # ------------------------------------------------------- HLS (fMP4/CMAF) + MSE

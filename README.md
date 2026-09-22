@@ -89,6 +89,66 @@ playback, and `no-store` is the more aggressive default this server ships with.
 Request logs include the `Range` header, which is usually the first useful clue
 after a seek.
 
+## Deploying to Railway
+
+Hosting this somewhere public is the most useful thing you can do with it: you
+point any client at one URL instead of getting a laptop onto the same network as
+each one. Railway terminates TLS at its edge, so the pages that need a secure
+context (10 WebCodecs, 12 Document PiP) work on remote clients against a real
+certificate, with no self-signed cert and no `-tls`.
+
+```
+railway up             # build and deploy from this directory
+railway logs           # request log, including the Range header
+railway domain         # get or create the public URL
+```
+
+The build is the `Dockerfile`, in three stages: generate media with ffmpeg,
+compile the server, then assemble a distroless image with the binary, `web/` and
+`media/`. Nothing is committed that the build can produce.
+
+The server reads `PORT`, which Railway injects, so no start command is needed.
+`/healthz` is wired up as the healthcheck.
+
+### Things worth knowing
+
+**First build takes several minutes,** because it generates the media. After
+that the media stage is cached and only rebuilds when `scripts/` changes, so
+code edits deploy quickly.
+
+**The image carries about 166 MB of media** at the default 60-second clip. To
+trade fidelity for size and egress, lower it:
+
+```
+railway variables --set DUR=20      # then redeploy; ~55 MB instead
+```
+
+`DUR` is a Docker `ARG`, so it only takes effect on a rebuild, and it changes
+clip length only — the frame indicator, codecs and bitrates are unchanged, so
+results stay comparable with a local run at the same `DUR`.
+
+**Egress is small but not zero.** A client working through all twelve pages pulls
+roughly 400-500 MB. That is cents per sweep, but it is worth knowing before you
+hand the URL to a fleet.
+
+**Impairment still works** via a custom start command, though over the public
+internet you already have real variance to contend with:
+
+```
+./server -delay 150ms -kbps 3000
+```
+
+**AV1 may be absent.** The media script picks whichever AV1 encoder the local
+ffmpeg has, preferring SVT-AV1 and falling back to libaom. If Debian's ffmpeg has
+neither, the build logs `av1 mp4 SKIPPED` and continues; the AV1 entry in page
+01's codec menu will then 404, which the telemetry panel reports as
+`MEDIA_ERR_SRC_NOT_SUPPORTED`. Everything else is unaffected.
+
+**Caching.** The server sends `no-store` by default so repeat runs are
+comparable. If a client stalls against the deployment but plays media from
+elsewhere, redeploy with `-cache` in the start command: Chromium's media stack
+leans on the HTTP cache for range-based playback.
+
 ## Layout
 
 ```

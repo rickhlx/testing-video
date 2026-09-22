@@ -1,0 +1,15 @@
+# Railway terminates TLS at its edge, so the server runs plain HTTP here and the
+# public URL is still https. That matters: WebCodecs (page 10) and Document PiP
+# (page 12) require a secure context, and a real certificate gives them one
+# without the self-signed cert that -tls would otherwise need.
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/healthz"
+# Generous, because the first boot follows a media build of several minutes.
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
