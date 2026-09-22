@@ -27,6 +27,15 @@ canvas.width = 1920; canvas.height = 1080;
 const ctx = canvas.getContext('2d', { alpha: false });
 stage.append(canvas);
 
+// The picture is images on a canvas, but the clip still has a soundtrack. An
+// audio-only element carries the same 440Hz tone as the rest of the matrix.
+// It is audio, not video, so the frame-drop pipeline this page avoids is still
+// avoided; the tone is constant, so it just plays rather than syncing to a
+// frame. Autoplay with sound needs a gesture, so it starts on the play button.
+const audio = document.createElement('audio');
+audio.src = '/media/audio.m4a';
+audio.preload = 'auto';
+
 const t = new Telemetry({ mount: panel, label: 'painted' });
 const paintRate = new Rate();
 
@@ -142,9 +151,11 @@ const start = () => {
   playing = true;
   pump(manifest.start);
 };
-button(controls, 'play', start);
-button(controls, 'pause', () => { playing = false; });
-button(controls, 'restart', () => { playing = false; start(); });
+// Frames auto-start silently on load; the tone needs a user gesture, so the
+// play button both starts audio and (re)starts the frames it did not already.
+button(controls, 'play', () => { audio.play().catch(() => t.log('press play again for sound', 'err')); if (!playing) start(); });
+button(controls, 'pause', () => { playing = false; audio.pause(); });
+button(controls, 'restart', () => { playing = false; audio.pause(); audio.currentTime = 0; start(); audio.play().catch(() => {}); });
 start();
 
 notes.innerHTML = `
@@ -156,7 +167,11 @@ notes.innerHTML = `
      inside the media pipeline, not on the link or in raw decode. The cost moves
      to image decode and to keeping <code>${LEAD}</code> frames fetched ahead; a
      slow link starves the buffer and shows the same skipped slots the video
-     pages would.</p>`;
+     pages would.</p>
+  <p>The frames are silent, so the clip's tone rides on a separate audio-only
+     element. Press play to start it &mdash; sound needs a user gesture. That is
+     an audio element, not a video one, so the pipeline this page avoids is still
+     avoided.</p>`;
 </script>
 </body>
 </html>

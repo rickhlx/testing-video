@@ -19,7 +19,9 @@ const { stage, controls, panel, notes } = scaffold('disguised-blob');
 const RAW = '/raw/h264-1080p24.mp4';
 
 const video = document.createElement('video');
-Object.assign(video, { controls: true, playsInline: true, muted: true });
+// Not muted: this page is the baseline's twin, and page 01 plays with sound.
+// Autoplay without a gesture will be refused; the play button starts it.
+Object.assign(video, { controls: true, playsInline: true });
 stage.append(video);
 
 const t = new Telemetry({ mount: panel, video });
