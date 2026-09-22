@@ -1,0 +1,7 @@
+# `railway up` uploads this directory before the image is built. Without this,
+# a local `make media` run would push ~245 MB on every deploy, for files the
+# media stage regenerates inside the image anyway.
+media
+bin
+.claude
+.git
