@@ -27,10 +27,19 @@ canvas.width = 1920; canvas.height = 1080;
 const ctx = canvas.getContext('2d', { alpha: false });
 stage.append(canvas);
 
+// The picture is images on a canvas, but the clip still has a soundtrack. An
+// audio-only element carries the same 440Hz tone as the rest of the matrix.
+// It is audio, not video, so the frame-drop pipeline this page avoids is still
+// avoided; the tone is constant, so it just plays rather than syncing to a
+// frame. Autoplay with sound needs a gesture, so it starts on the play button.
+const audio = document.createElement('audio');
+audio.src = '/media/audio.m4a';
+audio.preload = 'auto';
+
 const t = new Telemetry({ mount: panel, label: 'painted' });
 const paintRate = new Rate();
 
-let manifest, urlFor, decoded = 0, painted = 0, lastDrawn = -1, playing = false, startedAt = null;
+let manifest, urlFor, decoded = 0, painted = 0, skipped = 0, lastDrawn = -1, playing = false, startedAt = null;
 const bitmaps = new Map(); // index -> ImageBitmap, a sliding window
 let fetchCursor = 1, bytes = 0, inflight = 0;
 
@@ -81,22 +90,29 @@ function present(now) {
     pump(capped);
 
     if (capped > lastDrawn) {
-      const bmp = bitmaps.get(capped);
-      if (bmp) {
-        ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      // Draw the newest frame we actually hold at or before the clock target.
+      // If buffering fell behind the wall clock, skip ahead to it and count the
+      // gap as drops -- never freeze on a frame that has not arrived yet, which
+      // would read as a dead page rather than a starved one.
+      let show = -1;
+      for (let i = capped; i > lastDrawn; i--) { if (bitmaps.has(i)) { show = i; break; } }
+      if (show > 0) {
+        ctx.drawImage(bitmaps.get(show), 0, 0, canvas.width, canvas.height);
         painted++;
         t.markFrame();
+        skipped += show - lastDrawn - 1;
         // Free everything we have already passed, so memory stays bounded.
         for (const [i, b] of bitmaps) {
-          if (i <= capped) { b.close(); bitmaps.delete(i); }
+          if (i <= show) { b.close(); bitmaps.delete(i); }
         }
-        lastDrawn = capped;
+        lastDrawn = show;
         const fps = paintRate.sample(painted);
         t.set('present fps', fps === null ? '--' : fps.toFixed(1), rateClass(fps));
+        if (skipped) t.set('frames skipped', skipped, 'v-bad');
       } else {
-        // The clock moved on but the image is not here yet: a real drop, and
-        // the indicator will show a skipped slot on the next frame that lands.
-        t.set('starved at', capped, 'v-bad');
+        // Nothing buffered yet at or before the target: a genuine starve, not a
+        // hang. The next frame to land will paint and the clock catches up.
+        t.set('waiting on buffer', capped, 'v-warn');
       }
     }
 
@@ -123,7 +139,7 @@ function reset() {
   for (const b of bitmaps.values()) b.close();
   bitmaps.clear();
   fetchCursor = manifest.start;
-  decoded = 0; painted = 0; bytes = 0;
+  decoded = 0; painted = 0; skipped = 0; bytes = 0;
   lastDrawn = manifest.start - 1;
   startedAt = null;
   paintRate.samples = [];
@@ -135,9 +151,11 @@ const start = () => {
   playing = true;
   pump(manifest.start);
 };
-button(controls, 'play', start);
-button(controls, 'pause', () => { playing = false; });
-button(controls, 'restart', () => { playing = false; start(); });
+// Frames auto-start silently on load; the tone needs a user gesture, so the
+// play button both starts audio and (re)starts the frames it did not already.
+button(controls, 'play', () => { audio.play().catch(() => t.log('press play again for sound', 'err')); if (!playing) start(); });
+button(controls, 'pause', () => { playing = false; audio.pause(); });
+button(controls, 'restart', () => { playing = false; audio.pause(); audio.currentTime = 0; start(); audio.play().catch(() => {}); });
 start();
 
 notes.innerHTML = `
@@ -149,7 +167,11 @@ notes.innerHTML = `
      inside the media pipeline, not on the link or in raw decode. The cost moves
      to image decode and to keeping <code>${LEAD}</code> frames fetched ahead; a
      slow link starves the buffer and shows the same skipped slots the video
-     pages would.</p>`;
+     pages would.</p>
+  <p>The frames are silent, so the clip's tone rides on a separate audio-only
+     element. Press play to start it &mdash; sound needs a user gesture. That is
+     an audio element, not a video one, so the pipeline this page avoids is still
+     avoided.</p>`;
 </script>
 </body>
 </html>

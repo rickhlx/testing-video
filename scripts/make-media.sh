@@ -160,6 +160,16 @@ if [ ! -f "$OUT/frames/index.json" ]; then
 JSON
 fi
 
+# ------------------------------------------------------------ audio-only track
+# The still-frame page (14) has no <video>, so it carries no sound of its own.
+# A small audio-only file lets it play the same 440Hz tone as the rest of the
+# matrix without pulling a whole video down just for the track.
+if [ ! -f "$OUT/audio.m4a" ]; then
+  say "audio-only track"
+  ffmpeg -hide_banner -loglevel error -y -i "$OUT/source.mp4" \
+    -vn -c:a aac -b:a 128k -movflags +faststart "$OUT/audio.m4a"
+fi
+
 say "done"
 ls -lh "$OUT" | tail -n +2
 printf '\nhls: %s segments\ndash: %s segments\n' \

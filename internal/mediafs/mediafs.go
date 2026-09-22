@@ -19,6 +19,7 @@ var types = map[string]string{
 	".mp4":  "video/mp4",
 	".m4v":  "video/mp4",
 	".webm": "video/webm",
+	".m4a":  "audio/mp4",
 	".ts":   "video/mp2t",
 	".vtt":  "text/vtt",
 	".webp": "image/webp",
