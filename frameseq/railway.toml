@@ -1,0 +1,17 @@
+# Deploy this directory as its own Railway service: set the service's root
+# directory to frameseq/ and Railway picks this up.
+#
+# Nothing on the page needs a secure context -- no WebCodecs, no MSE, no media
+# element -- so the server runs plain HTTP behind Railway's TLS edge and there
+# is no certificate story to tell.
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/healthz"
+# Generous: the first boot follows an ffmpeg ingest of every clip in the image.
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3

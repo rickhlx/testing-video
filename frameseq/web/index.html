@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>frame-sequence harness</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<header class="top">
+  <h1>frame sequence</h1>
+  <label class="field">clip <select id="clip"></select></label>
+  <div class="modes" id="modes" role="group" aria-label="pipeline under test">
+    <button type="button" data-mode="frames" aria-pressed="true">frames</button>
+    <button type="button" data-mode="reference" aria-pressed="false">reference &lt;video&gt;</button>
+  </div>
+  <span class="spacer"></span>
+  <span class="meta" id="meta"></span>
+</header>
+
+<main class="split">
+  <section>
+    <div class="stage" id="stage"></div>
+    <div class="controls" id="controls">
+      <button type="button" id="play">play</button>
+      <button type="button" id="pause">pause</button>
+      <button type="button" id="restart">restart</button>
+    </div>
+    <div class="notes" id="notes"></div>
+  </section>
+  <aside class="panelmount" id="panel"></aside>
+</main>
+
+<script type="module" src="/assets/app.js"></script>
+</body>
+</html>
