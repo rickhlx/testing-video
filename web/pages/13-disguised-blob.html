@@ -25,16 +25,42 @@ stage.append(video);
 const t = new Telemetry({ mount: panel, video });
 t.set('transport', 'application/octet-stream', 'v-warn');
 
+// Re-wrapping means nothing can play until the whole file is in hand, so a slow
+// link would otherwise sit on a black stage with no explanation. Stream the
+// download and show progress, so it reads as buffering rather than as broken.
+const status = document.createElement('div');
+status.style.cssText = 'padding:10px 12px;color:var(--fg-dim);font-size:13px';
+status.textContent = 'buffering disguised bytes…';
+stage.append(status);
+
 const started = performance.now();
 try {
-  const buf = await (await fetch(RAW)).arrayBuffer();
-  t.set('fetched', `${(buf.byteLength / 1e6).toFixed(1)} MB`, 'v-ok');
+  const resp = await fetch(RAW);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const total = Number(resp.headers.get('Content-Length')) || 0;
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    const mb = (received / 1e6).toFixed(1);
+    const pct = total ? Math.round((received / total) * 100) : null;
+    status.textContent = `buffering disguised bytes… ${mb} MB${pct === null ? '' : ` (${pct}%)`}`;
+    t.set('fetched', `${mb} MB`, 'v-warn');
+    if (pct !== null) t.set('buffer', `${pct}%`, pct >= 100 ? 'v-ok' : 'v-warn');
+  }
+  status.remove();
   t.set('fetch time', `${(performance.now() - started).toFixed(0)} ms`);
-  const url = URL.createObjectURL(new Blob([buf], { type: 'video/mp4' }));
+  t.set('fetched', `${(received / 1e6).toFixed(1)} MB`, 'v-ok');
+  const url = URL.createObjectURL(new Blob(chunks, { type: 'video/mp4' }));
   video.src = url;
   video.addEventListener('ended', () => URL.revokeObjectURL(url), { once: true });
   await video.play().catch((e) => t.log(`autoplay blocked: ${e.message}; press play`));
 } catch (e) {
+  status.textContent = `fetch failed: ${e.message}`;
   t.fail(`fetch failed: ${e.message}`);
 }
 

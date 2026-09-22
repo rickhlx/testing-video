@@ -30,7 +30,7 @@ stage.append(canvas);
 const t = new Telemetry({ mount: panel, label: 'painted' });
 const paintRate = new Rate();
 
-let manifest, urlFor, decoded = 0, painted = 0, lastDrawn = -1, playing = false, startedAt = null;
+let manifest, urlFor, decoded = 0, painted = 0, skipped = 0, lastDrawn = -1, playing = false, startedAt = null;
 const bitmaps = new Map(); // index -> ImageBitmap, a sliding window
 let fetchCursor = 1, bytes = 0, inflight = 0;
 
@@ -81,22 +81,29 @@ function present(now) {
     pump(capped);
 
     if (capped > lastDrawn) {
-      const bmp = bitmaps.get(capped);
-      if (bmp) {
-        ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      // Draw the newest frame we actually hold at or before the clock target.
+      // If buffering fell behind the wall clock, skip ahead to it and count the
+      // gap as drops -- never freeze on a frame that has not arrived yet, which
+      // would read as a dead page rather than a starved one.
+      let show = -1;
+      for (let i = capped; i > lastDrawn; i--) { if (bitmaps.has(i)) { show = i; break; } }
+      if (show > 0) {
+        ctx.drawImage(bitmaps.get(show), 0, 0, canvas.width, canvas.height);
         painted++;
         t.markFrame();
+        skipped += show - lastDrawn - 1;
         // Free everything we have already passed, so memory stays bounded.
         for (const [i, b] of bitmaps) {
-          if (i <= capped) { b.close(); bitmaps.delete(i); }
+          if (i <= show) { b.close(); bitmaps.delete(i); }
         }
-        lastDrawn = capped;
+        lastDrawn = show;
         const fps = paintRate.sample(painted);
         t.set('present fps', fps === null ? '--' : fps.toFixed(1), rateClass(fps));
+        if (skipped) t.set('frames skipped', skipped, 'v-bad');
       } else {
-        // The clock moved on but the image is not here yet: a real drop, and
-        // the indicator will show a skipped slot on the next frame that lands.
-        t.set('starved at', capped, 'v-bad');
+        // Nothing buffered yet at or before the target: a genuine starve, not a
+        // hang. The next frame to land will paint and the clock catches up.
+        t.set('waiting on buffer', capped, 'v-warn');
       }
     }
 
@@ -123,7 +130,7 @@ function reset() {
   for (const b of bitmaps.values()) b.close();
   bitmaps.clear();
   fetchCursor = manifest.start;
-  decoded = 0; painted = 0; bytes = 0;
+  decoded = 0; painted = 0; skipped = 0; bytes = 0;
   lastDrawn = manifest.start - 1;
   startedAt = null;
   paintRate.samples = [];
