@@ -23,7 +23,7 @@ ingest-all: ## Ingest every new video in sources/
 	./scripts/ingest-all.sh $(ARGS)
 
 clips: ## List what has been ingested
-	@find media -name clip.json -exec sh -c 'echo "--- $$(dirname {})"; cat {}' \; 2>/dev/null || echo 'nothing ingested'
+	@./scripts/list-clips.sh
 
 clean: ## Remove build output (leaves ingested clips alone)
 	rm -rf bin

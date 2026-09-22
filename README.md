@@ -86,6 +86,9 @@ cd frameseq && make sample && make run
 make ingest SRC=path/to/your-video.mp4
 ```
 
+Adding a clip there is an ingest, not a code change; the walkthrough is under
+[How to add a video](frameseq/README.md#how-to-add-a-video).
+
 ## How to run an investigation
 
 Work down the list. The first page that misbehaves names the layer.
