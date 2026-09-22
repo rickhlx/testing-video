@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button } from '/assets/scaffold.js';
+import { Telemetry } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('disguised-blob');
+
+// The bytes are the same H.264 file page 01 plays. The difference is entirely
+// on the wire: /raw serves them as application/octet-stream, so nothing about
+// the request or the response announces video. Only once the whole body is in
+// memory is it re-declared video/mp4, as a Blob, and handed to a <video>.
+const RAW = '/raw/h264-1080p24.mp4';
+
+const video = document.createElement('video');
+Object.assign(video, { controls: true, playsInline: true, muted: true });
+stage.append(video);
+
+const t = new Telemetry({ mount: panel, video });
+t.set('transport', 'application/octet-stream', 'v-warn');
+
+const started = performance.now();
+try {
+  const buf = await (await fetch(RAW)).arrayBuffer();
+  t.set('fetched', `${(buf.byteLength / 1e6).toFixed(1)} MB`, 'v-ok');
+  t.set('fetch time', `${(performance.now() - started).toFixed(0)} ms`);
+  const url = URL.createObjectURL(new Blob([buf], { type: 'video/mp4' }));
+  video.src = url;
+  video.addEventListener('ended', () => URL.revokeObjectURL(url), { once: true });
+  await video.play().catch((e) => t.log(`autoplay blocked: ${e.message}; press play`));
+} catch (e) {
+  t.fail(`fetch failed: ${e.message}`);
+}
+
+button(controls, 'play', () => video.play());
+button(controls, 'pause', () => video.pause());
+button(controls, 'restart', () => { video.currentTime = 0; video.play(); });
+
+notes.innerHTML = `
+  <p>Identical bytes to page 01, delivered so the link never sees a video
+     request: <code>/raw</code> answers with <code>application/octet-stream</code>
+     and no media extension in play. The bytes are buffered whole, then re-wrapped
+     as a <code>video/mp4</code> Blob and played.</p>
+  <p>This still uses the native decode path and a real <code>&lt;video&gt;</code>
+     element. So a frame-drop control that reads the decoded pipeline will still
+     bite here, and a difference from page 01 points instead at something that
+     classified the traffic by URL, MIME or response shape rather than by what was
+     decoded.</p>`;
+</script>
+</body>
+</html>

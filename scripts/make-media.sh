@@ -128,6 +128,38 @@ if [ ! -f "$OUT/dash/manifest.mpd" ]; then
     "$OUT/dash/manifest.mpd"
 fi
 
+# -------------------------------------------------- still-frame sequence
+# The same 1080p24 clip as individual still images. A client that blits these
+# to a canvas on a 24fps clock reproduces the picture without ever creating a
+# <video>, a decoder or an MSE buffer, so a frame-drop control that engages on
+# the recognised video pipeline has nothing to engage on. Prefer webp for size;
+# fall back to mjpeg, which every ffmpeg build carries. Extension is recorded in
+# the manifest so the page fetches whatever was actually written.
+if [ ! -f "$OUT/frames/index.json" ]; then
+  mkdir -p "$OUT/frames"
+  if has_encoder libwebp; then
+    say "still-frame sequence (webp)"
+    ext=webp; frame_args="-c:v libwebp -q:v 80"
+  else
+    say "still-frame sequence (mjpeg)"
+    ext=jpg; frame_args="-c:v mjpeg -q:v 3"
+  fi
+  # shellcheck disable=SC2086
+  ffmpeg -hide_banner -loglevel error -y -i "$OUT/source.mp4" \
+    -an $frame_args "$OUT/frames/f%05d.$ext"
+  count=$(ls "$OUT"/frames/f*."$ext" | wc -l | tr -d ' ')
+  cat > "$OUT/frames/index.json" <<JSON
+{
+  "pattern": "f%05d.$ext",
+  "start": 1,
+  "count": $count,
+  "fps": $FPS,
+  "width": 1920,
+  "height": 1080
+}
+JSON
+fi
+
 say "done"
 ls -lh "$OUT" | tail -n +2
 printf '\nhls: %s segments\ndash: %s segments\n' \
