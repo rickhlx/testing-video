@@ -6,5 +6,3 @@ bin
 media
 *.md
 Makefile
-# A separate service with its own Dockerfile; never part of the matrix image.
-frameseq

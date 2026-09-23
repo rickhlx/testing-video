@@ -1,7 +1,0 @@
-# Ingested clips: large, and reproducible from whatever is in sources/.
-/media/
-# Source videos dropped in for ingest. Keep them locally, don't commit them.
-/sources/*
-!/sources/.gitkeep
-# Build output.
-/bin/

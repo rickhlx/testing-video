@@ -76,18 +76,19 @@ matrix compares mechanisms and holding the content constant is what makes that
 comparison mean anything. Which content a frame-drop control reacts to is a
 different question, and it needs the opposite setup: one mechanism, many clips.
 
-`frameseq/` is that setup — page 14's method extracted into a self-contained
-harness with a clip picker, an ingest script for adding videos, and the same
-clip through an ordinary `<video>` alongside it as a control. See
-[`frameseq/README.md`](frameseq/README.md).
+[**frameseq**](https://github.com/rickhlx/frameseq) is that setup, in its own
+repository — page 14's method with a clip picker, an ingest script for adding
+videos, and the same clip through an ordinary `<video>` alongside it as a
+control.
 
 ```
+git clone git@github.com:rickhlx/frameseq.git
 cd frameseq && make sample && make run
 make ingest SRC=path/to/your-video.mp4
 ```
 
-Adding a clip there is an ingest, not a code change; the walkthrough is under
-[How to add a video](frameseq/README.md#how-to-add-a-video).
+Adding a clip there is an ingest, not a code change; its README has the
+walkthrough.
 
 ## How to run an investigation
 
@@ -211,11 +212,7 @@ scripts/            media generation
 web/pages/          the twelve pages
 web/assets/         shared telemetry, scaffold and styling
 web/vendor/         hls.js, shaka-player, mp4box.js, vendored for offline labs
-frameseq/           page 14's method as a standalone multi-clip harness
 ```
-
-`frameseq/` is its own Go module and deploys separately; it is here for
-proximity, not because it shares code.
 
 Libraries are vendored rather than pulled from a CDN so the matrix works on an
 isolated lab network.
