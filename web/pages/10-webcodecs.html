@@ -73,7 +73,9 @@ if (!('VideoDecoder' in self)) {
     for (const entry of trak.mdia.minf.stbl.stsd.entries) {
       const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
       if (!box) continue;
-      const stream = new MP4Box.DataStream(undefined, 0, MP4Box.DataStream.BIG_ENDIAN);
+      // This mp4box build exports DataStream as a bare global, not on MP4Box.
+      const DS = MP4Box.DataStream || DataStream;
+      const stream = new DS(undefined, 0, DS.BIG_ENDIAN);
       box.write(stream);
       return new Uint8Array(stream.buffer, 8);
     }
