@@ -1,4 +1,0 @@
-# Built inside the image, not copied in.
-media/
-bin/
-# sources/ is deliberately NOT ignored: a local build ingests whatever is there.
