@@ -11,7 +11,7 @@
   <h1 style="margin:0 0 6px">Video test matrix</h1>
   <p class="lede">
     Twelve ways of putting the same 1080p24 clip on screen, each isolating a
-    different layer, plus two red-team paths (13, 14) that test where a
+    different layer, plus six red-team paths (13&ndash;18) that test where a
     deliberate frame-drop is decided. Every page reports the same telemetry, so
     two pages can be compared directly. Run them in order: the first page that
     misbehaves names the layer at fault.
@@ -59,6 +59,8 @@ const predicted = {
   'webgl':         caps.features['WebGL2'],
   'webcodecs':     caps.features['VideoDecoder (WebCodecs)'] && caps.features['secure context'],
   'pip':           caps.features['Picture-in-Picture'],
+  'opaque-webcodecs': caps.features['VideoDecoder (WebCodecs)'] && caps.features['secure context'],
+  'webgpu-external':  caps.features['WebGPU'] && caps.features['VideoDecoder (WebCodecs)'] && caps.features['secure context'],
 };
 
 document.getElementById('matrix').innerHTML = PAGES.map((p) => {

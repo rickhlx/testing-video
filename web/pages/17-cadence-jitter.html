@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button, select } from '/assets/scaffold.js';
+import { Telemetry, Rate, rateClass } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('cadence-jitter');
+
+// Page 14 removes the media pipeline but still paints on a metronomic clock: a
+// clean 24Hz grid is itself a signal a cadence detector can lock to. This page
+// paints the same still frames, but schedules each paint at nominal period plus
+// bounded zero-mean noise, so inter-paint intervals scatter while the average
+// rate stays 24fps and every frame is still shown. What is left for a control to
+// recognise is regularity, and this page has none.
+const DIR = '/media/frames';
+const FPS = 24;
+const PERIOD = 1000 / FPS;
+const LEAD = 48;
+
+const canvas = document.createElement('canvas');
+canvas.width = 1920; canvas.height = 1080;
+const ctx = canvas.getContext('2d', { alpha: false });
+stage.append(canvas);
+
+const audio = document.createElement('audio');
+audio.src = '/media/audio.m4a';
+audio.preload = 'auto';
+
+const t = new Telemetry({ mount: panel, label: 'painted' });
+const paintRate = new Rate();
+
+// Jitter as a fraction of the nominal period. 0 reproduces page 14's grid; the
+// default scatters each paint by up to +/-60% of a frame, average unchanged.
+let jitter = 0.6;
+
+let manifest, urlFor, decoded = 0, painted = 0, skipped = 0, playing = false;
+let k = 0, base = null, timer = null, lastDrawn = -1;
+const bitmaps = new Map();
+let fetchCursor = 1, bytes = 0, inflight = 0;
+const paintTimes = []; // recent actual paint timestamps, for the spread metric
+
+const pad = (n, w) => String(n).padStart(w, '0');
+
+try {
+  manifest = await (await fetch(`${DIR}/index.json`)).json();
+  const m = manifest.pattern.match(/%0(\d+)d/);
+  const width = m ? Number(m[1]) : 5;
+  urlFor = (i) => `${DIR}/` + manifest.pattern.replace(/%0\d+d/, pad(i, width));
+  fetchCursor = manifest.start;
+  t.set('frames total', manifest.count);
+  t.log(`manifest: ${manifest.count} frames @ ${manifest.fps}fps`, 'good');
+} catch (e) {
+  t.fail(`no frame manifest: ${e.message}. Rebuild media, then reload.`);
+}
+
+async function pump(target) {
+  const last = manifest.start + manifest.count - 1;
+  while (manifest && fetchCursor <= last && fetchCursor <= target + LEAD && inflight < 6) {
+    const i = fetchCursor++;
+    inflight++;
+    (async () => {
+      try {
+        const blob = await (await fetch(urlFor(i))).blob();
+        bytes += blob.size;
+        bitmaps.set(i, await createImageBitmap(blob));
+        decoded++;
+      } catch (e) {
+        t.fail(`frame ${i}: ${e.message}`);
+      } finally {
+        inflight--;
+      }
+    })();
+  }
+}
+
+// stdev/mean of the last few inter-paint gaps. A steady grid trends to 0; the
+// jittered schedule holds it well above, which is the whole point of the page.
+function spread() {
+  if (paintTimes.length < 4) return null;
+  const gaps = [];
+  for (let i = 1; i < paintTimes.length; i++) gaps.push(paintTimes[i] - paintTimes[i - 1]);
+  const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+  const varr = gaps.reduce((a, b) => a + (b - mean) ** 2, 0) / gaps.length;
+  return mean > 0 ? Math.sqrt(varr) / mean : null;
+}
+
+function tick() {
+  if (!playing || !manifest) return;
+  const now = performance.now();
+  // Content advances exactly one frame per tick, so the jittered paint *timing*
+  // never itself drops a frame; only a buffer that cannot keep up does. The
+  // target is start+k; draw the newest held frame at or before it.
+  const capped = Math.min(manifest.start + k, manifest.start + manifest.count - 1);
+  pump(capped);
+
+  if (capped > lastDrawn) {
+    let show = -1;
+    for (let i = capped; i > lastDrawn; i--) { if (bitmaps.has(i)) { show = i; break; } }
+    if (show > 0) {
+      ctx.drawImage(bitmaps.get(show), 0, 0, canvas.width, canvas.height);
+      painted++;
+      t.markFrame();
+      paintTimes.push(now);
+      while (paintTimes.length > 48) paintTimes.shift();
+      // Anything the target passed over never arrived in time: a genuine starve,
+      // counted exactly as page 14 counts it.
+      skipped += show - lastDrawn - 1;
+      for (const [i, b] of bitmaps) { if (i <= show) { b.close(); bitmaps.delete(i); } }
+      lastDrawn = show;
+      const fps = paintRate.sample(painted);
+      t.set('present fps', fps === null ? '--' : fps.toFixed(1), rateClass(fps));
+      const sp = spread();
+      if (sp !== null) t.set('interval spread', sp.toFixed(2), sp > 0.2 ? 'v-warn' : 'v-ok');
+      if (skipped) t.set('frames skipped', skipped, 'v-bad');
+    } else {
+      t.set('waiting on buffer', capped, 'v-warn');
+    }
+  }
+  t.set('buffered ahead', Math.max(0, fetchCursor - 1 - capped), 'v-ok');
+  t.set('frames decoded', decoded);
+  if (bytes) t.set('images downloaded', `${(bytes / 1e6).toFixed(1)} MB`);
+
+  if (capped >= manifest.start + manifest.count - 1) { playing = false; t.log('ended', 'good'); return; }
+
+  // Schedule the next paint against an absolute grid so the jitter is zero-mean
+  // and the clip neither drifts fast nor slow: target k*PERIOD from base, then
+  // nudge by bounded noise. Content advances one frame per tick regardless.
+  k++;
+  const targetAt = base + k * PERIOD + (Math.random() * 2 - 1) * jitter * PERIOD;
+  timer = setTimeout(tick, Math.max(0, targetAt - performance.now()));
+}
+
+function reset() {
+  for (const b of bitmaps.values()) b.close();
+  bitmaps.clear();
+  fetchCursor = manifest.start;
+  decoded = 0; painted = 0; skipped = 0; bytes = 0; k = 0;
+  lastDrawn = manifest.start - 1;
+  base = null; paintTimes.length = 0; paintRate.samples = [];
+}
+
+const start = () => {
+  if (!manifest || playing) return;
+  reset();
+  playing = true;
+  pump(manifest.start);
+  base = performance.now();
+  tick();
+};
+
+// Buffering runs on its own clock, independent of the jittered paint schedule.
+setInterval(() => { if (playing && manifest) pump(manifest.start + k); }, 100);
+
+select(controls, 'jitter', { '0.6': '±60%', '0.3': '±30%', '0': 'none (grid)', '0.9': '±90%' }, (v) => { jitter = Number(v); });
+button(controls, 'play', () => { audio.play().catch(() => t.log('press play again for sound', 'err')); if (!playing) start(); });
+button(controls, 'pause', () => { playing = false; clearTimeout(timer); audio.pause(); });
+button(controls, 'restart', () => { playing = false; clearTimeout(timer); audio.pause(); audio.currentTime = 0; start(); audio.play().catch(() => {}); });
+start();
+
+notes.innerHTML = `
+  <p>The still frames of page 14, painted off a jittered clock: each paint is
+     scheduled at the nominal frame period plus bounded zero-mean noise, so the
+     interval between paints scatters while the average rate stays 24fps and no
+     frame is dropped. <code>interval spread</code> is the scatter &mdash;
+     stdev over mean of recent gaps; set jitter to <code>none</code> to fall back
+     to page 14's regular grid.</p>
+  <p>Isolates <em>temporal</em> recognition. If a control drops on 14 but not
+     here, it was locking to the 24Hz cadence; if it drops on both, the cadence
+     was not the tell. Note the trade: <code>requestAnimationFrame</code> paces
+     to the display refresh, which is itself regular, so this page uses a timer
+     to break the grid and accepts the coarser scheduling that comes with it.</p>`;
+</script>
+</body>
+</html>

@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button, loadScript } from '/assets/scaffold.js';
+import { Telemetry, Rate, rateClass } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('opaque-webcodecs');
+
+// Page 13 changed only the label on the wire: /raw said octet-stream, but the
+// bytes were still a readable MP4. This page changes the bytes. /raw serves a
+// blob XORed with a constant, so nothing on the wire matches an ftyp box, a moov
+// atom or an H.264 start code -- a classifier reading the *payload* for a video
+// signature finds none. The page XORs it back in memory, demuxes with mp4box,
+// and feeds a WebCodecs VideoDecoder. There is no <video> anywhere, so a control
+// hooking the recognised media pipeline has nothing to hook either.
+const SRC = '/raw/h264-scrambled.bin';
+const KEY = 0x5a;
+const FPS = 24;
+
+const canvas = document.createElement('canvas');
+canvas.width = 1920; canvas.height = 1080;
+const ctx = canvas.getContext('2d', { alpha: false });
+stage.append(canvas);
+
+// The bytes carry no video the pipeline sees, so like page 14 the sound rides
+// on a separate audio-only element, started on the play gesture.
+const audio = document.createElement('audio');
+audio.src = '/media/audio.m4a';
+audio.preload = 'auto';
+
+const t = new Telemetry({ mount: panel, label: 'painted' });
+t.set('transport', 'application/octet-stream, xored', 'v-warn');
+t.set('secure context', String(self.isSecureContext), self.isSecureContext ? 'v-ok' : 'v-bad');
+
+const status = document.createElement('div');
+status.style.cssText = 'padding:10px 12px;color:var(--fg-dim);font-size:13px';
+stage.append(status);
+
+if (!('VideoDecoder' in self)) {
+  status.textContent = 'WebCodecs unavailable on this client.';
+  t.fail('No VideoDecoder on this client. WebCodecs is unavailable.');
+  if (!self.isSecureContext) t.fail('Not a secure context: serve with -tls, or use localhost.');
+} else {
+  await loadScript('/vendor/mp4box.all.min.js');
+
+  const paintRate = new Rate();
+  let decoded = 0, painted = 0;
+  const queue = [];
+  let startedAt = null;
+
+  // Decoder output is unpaced; present on the rAF clock so the fps here means
+  // the same thing it does on every other page.
+  const present = () => {
+    if (startedAt === null && queue.length) startedAt = performance.now();
+    const elapsed = startedAt === null ? 0 : (performance.now() - startedAt) / 1000;
+    let frame = null;
+    while (queue.length && queue[0].timestamp / 1e6 <= elapsed) {
+      if (frame) frame.close();
+      frame = queue.shift();
+    }
+    if (frame) {
+      ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+      frame.close();
+      painted++;
+      t.markFrame();
+      const fps = paintRate.sample(painted);
+      t.set('present fps', fps === null ? '--' : fps.toFixed(1), rateClass(fps));
+    }
+    t.set('queued frames', queue.length, queue.length > FPS ? 'v-warn' : 'v-ok');
+    requestAnimationFrame(present);
+  };
+  requestAnimationFrame(present);
+
+  const decoder = new VideoDecoder({
+    output: (frame) => { decoded++; t.set('frames decoded', decoded); queue.push(frame); },
+    error: (e) => t.fail(`decoder error: ${e.message}`),
+  });
+
+  // The decoder needs the avcC box verbatim; mp4box parses it, so re-serialise
+  // and drop the 8-byte box header, exactly as page 10 does.
+  const description = (file, track) => {
+    const trak = file.getTrackById(track.id);
+    for (const entry of trak.mdia.minf.stbl.stsd.entries) {
+      const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
+      if (!box) continue;
+      // This mp4box build exports DataStream as a bare global, not on MP4Box.
+      const DS = MP4Box.DataStream || DataStream;
+      const s = new DS(undefined, 0, DS.BIG_ENDIAN);
+      box.write(s);
+      return new Uint8Array(s.buffer, 8);
+    }
+    return undefined;
+  };
+
+  const file = MP4Box.createFile();
+  file.onError = (e) => t.fail(`demux error: ${e}`);
+  file.onReady = async (info) => {
+    const track = info.videoTracks[0];
+    const config = {
+      codec: track.codec,
+      codedWidth: track.video.width,
+      codedHeight: track.video.height,
+      description: description(file, track),
+    };
+    t.set('codec', track.codec);
+    t.set('coded size', `${track.video.width}x${track.video.height}`);
+    const support = await VideoDecoder.isConfigSupported(config);
+    t.set('isConfigSupported', String(support.supported), support.supported ? 'v-ok' : 'v-bad');
+    if (!support.supported) { t.fail('Decoder rejected the configuration.'); return; }
+    decoder.configure(config);
+    t.log(`decoder configured for ${track.codec}`, 'good');
+    file.setExtractionOptions(track.id, null, { nbSamples: 24 });
+    file.start();
+  };
+  file.onSamples = (_id, _user, samples) => {
+    for (const s of samples) {
+      decoder.decode(new EncodedVideoChunk({
+        type: s.is_sync ? 'key' : 'delta',
+        timestamp: (s.cts * 1e6) / s.timescale,
+        duration: (s.duration * 1e6) / s.timescale,
+        data: s.data,
+      }));
+    }
+    t.set('decode queue', decoder.decodeQueueSize);
+  };
+
+  // Re-wrapping needs the whole blob in hand, so stream it with progress rather
+  // than sitting on a black stage over a slow link, the way page 13 does.
+  status.textContent = 'buffering scrambled bytes…';
+  const started = performance.now();
+  try {
+    const resp = await fetch(SRC);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const total = Number(resp.headers.get('Content-Length')) || 0;
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      const mb = (received / 1e6).toFixed(1);
+      const pct = total ? Math.round((received / total) * 100) : null;
+      status.textContent = `buffering scrambled bytes… ${mb} MB${pct === null ? '' : ` (${pct}%)`}`;
+      t.set('fetched', `${mb} MB`, 'v-warn');
+      if (pct !== null) t.set('buffer', `${pct}%`, pct >= 100 ? 'v-ok' : 'v-warn');
+    }
+    // Flatten and XOR back to the original MP4 in place. Single byte, so this is
+    // one linear pass over the buffer -- cheap next to the decode that follows.
+    const buf = new Uint8Array(received);
+    let off = 0;
+    for (const c of chunks) { buf.set(c, off); off += c.length; }
+    for (let i = 0; i < buf.length; i++) buf[i] ^= KEY;
+    status.remove();
+    t.set('descramble', `${(received / 1e6).toFixed(1)} MB xored`, 'v-ok');
+    t.set('fetch time', `${(performance.now() - started).toFixed(0)} ms`);
+
+    const ab = buf.buffer;
+    ab.fileStart = 0;
+    file.appendBuffer(ab);
+    file.flush();
+    t.log(`demuxing ${(buf.length / 1e6).toFixed(1)} MB (descrambled)`, 'good');
+  } catch (e) {
+    status.textContent = `fetch failed: ${e.message}`;
+    t.fail(`fetch failed: ${e.message}`);
+  }
+}
+
+button(controls, 'play sound', () => audio.play().catch(() => t.log('press again for sound', 'err')));
+button(controls, 'pause sound', () => audio.pause());
+button(controls, 'reload', () => location.reload());
+
+notes.innerHTML = `
+  <p>The bytes on the wire are the page-01 H.264 file XORed with a constant, so
+     the payload carries no <code>ftyp</code> box, no <code>moov</code> atom and
+     no H.264 start codes &mdash; there is no video signature to match. The page
+     XORs it back, demuxes with mp4box.js and decodes with
+     <code>VideoDecoder</code>, painting on the rAF clock. No
+     <code>&lt;video&gt;</code> element exists.</p>
+  <p>This extends page 13. If 13 already behaves like 01, recognition was never
+     on the wire. If 13 differs from 01 but this page matches 01, the classifier
+     was reading the payload for a video signature, and scrambling defeats it. A
+     difference here instead points back into decode or the link. The XOR is a
+     single byte: it hides structure, it is not encryption.</p>
+  <p>Needs a secure context for WebCodecs, so over the LAN this page only works
+     under <code>-tls</code>. Sound rides on a separate audio-only element.</p>`;
+</script>
+</body>
+</html>

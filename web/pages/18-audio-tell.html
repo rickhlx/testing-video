@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button, select } from '/assets/scaffold.js';
+import { Telemetry, Rate, rateClass } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('audio-tell');
+
+// A frame-drop control might not watch the pixels at all: a synchronised
+// audio+video pair moving together is a recognisable media signature on its own.
+// Page 14 already carries a constant, free-running tone. This page paints the
+// same still frames and switches what the audio does around them -- none, an
+// independent tone, or a track kept in lockstep with the frame clock -- so the
+// only thing changing between runs is whether an A/V pair is present and paired.
+const DIR = '/media/frames';
+const FPS = 24;
+const LEAD = 48;
+
+const canvas = document.createElement('canvas');
+canvas.width = 1920; canvas.height = 1080;
+const ctx = canvas.getContext('2d', { alpha: false });
+stage.append(canvas);
+
+const audio = document.createElement('audio');
+audio.src = '/media/audio.m4a';
+audio.preload = 'auto';
+
+const t = new Telemetry({ mount: panel, label: 'painted' });
+const paintRate = new Rate();
+
+// 'silent' | 'independent' | 'paired'. Paired keeps audio time locked to the
+// frame clock, so the two tracks correlate the way a real clip's would.
+let audioMode = 'paired';
+t.set('audio', audioMode, 'v-warn');
+
+let manifest, urlFor, decoded = 0, painted = 0, skipped = 0, lastDrawn = -1, playing = false, startedAt = null;
+const bitmaps = new Map();
+let fetchCursor = 1, bytes = 0, inflight = 0;
+
+const pad = (n, w) => String(n).padStart(w, '0');
+
+try {
+  manifest = await (await fetch(`${DIR}/index.json`)).json();
+  const m = manifest.pattern.match(/%0(\d+)d/);
+  const width = m ? Number(m[1]) : 5;
+  urlFor = (i) => `${DIR}/` + manifest.pattern.replace(/%0\d+d/, pad(i, width));
+  fetchCursor = manifest.start;
+  t.set('frames total', manifest.count);
+  t.log(`manifest: ${manifest.count} frames @ ${manifest.fps}fps`, 'good');
+} catch (e) {
+  t.fail(`no frame manifest: ${e.message}. Rebuild media, then reload.`);
+}
+
+async function pump(target) {
+  const last = manifest.start + manifest.count - 1;
+  while (manifest && fetchCursor <= last && fetchCursor <= target + LEAD && inflight < 6) {
+    const i = fetchCursor++;
+    inflight++;
+    (async () => {
+      try {
+        const blob = await (await fetch(urlFor(i))).blob();
+        bytes += blob.size;
+        bitmaps.set(i, await createImageBitmap(blob));
+        decoded++;
+      } catch (e) {
+        t.fail(`frame ${i}: ${e.message}`);
+      } finally {
+        inflight--;
+      }
+    })();
+  }
+}
+
+function present(now) {
+  if (playing && manifest) {
+    if (startedAt === null && bitmaps.has(manifest.start)) startedAt = now;
+    const elapsed = startedAt === null ? 0 : (now - startedAt) / 1000;
+    const want = manifest.start + Math.floor(elapsed * FPS);
+    const capped = Math.min(want, manifest.start + manifest.count - 1);
+    pump(capped);
+
+    // In paired mode, hold the soundtrack against the same frame clock so the
+    // two move together. A small correction band avoids audible re-seeking on
+    // every rAF while keeping the pair correlated to within a frame or two.
+    if (audioMode === 'paired' && !audio.paused && Math.abs(audio.currentTime - elapsed) > 0.15) {
+      audio.currentTime = elapsed;
+    }
+
+    if (capped > lastDrawn) {
+      let show = -1;
+      for (let i = capped; i > lastDrawn; i--) { if (bitmaps.has(i)) { show = i; break; } }
+      if (show > 0) {
+        ctx.drawImage(bitmaps.get(show), 0, 0, canvas.width, canvas.height);
+        painted++;
+        t.markFrame();
+        skipped += show - lastDrawn - 1;
+        for (const [i, b] of bitmaps) { if (i <= show) { b.close(); bitmaps.delete(i); } }
+        lastDrawn = show;
+        const fps = paintRate.sample(painted);
+        t.set('present fps', fps === null ? '--' : fps.toFixed(1), rateClass(fps));
+        if (skipped) t.set('frames skipped', skipped, 'v-bad');
+      } else {
+        t.set('waiting on buffer', capped, 'v-warn');
+      }
+    }
+    t.set('buffered ahead', Math.max(0, fetchCursor - 1 - capped), 'v-ok');
+    t.set('frames decoded', decoded);
+    if (bytes) t.set('images downloaded', `${(bytes / 1e6).toFixed(1)} MB`);
+    if (capped >= manifest.start + manifest.count - 1) { playing = false; t.log('ended', 'good'); }
+  }
+  requestAnimationFrame(present);
+}
+requestAnimationFrame(present);
+
+setInterval(() => { if (playing && manifest) pump(lastDrawn + 1); }, 100);
+
+function reset() {
+  for (const b of bitmaps.values()) b.close();
+  bitmaps.clear();
+  fetchCursor = manifest.start;
+  decoded = 0; painted = 0; skipped = 0; bytes = 0;
+  lastDrawn = manifest.start - 1;
+  startedAt = null;
+  paintRate.samples = [];
+}
+
+// Start audio according to the current mode. Silent plays nothing at all;
+// independent and paired both start the tone, and present() syncs it in paired.
+function startAudio() {
+  if (audioMode === 'silent') { audio.pause(); return; }
+  audio.play().catch(() => t.log('press play again for sound', 'err'));
+}
+
+const start = () => {
+  if (!manifest || playing) return;
+  reset();
+  playing = true;
+  pump(manifest.start);
+};
+
+select(controls, 'audio', { paired: 'paired (synced)', independent: 'independent tone', silent: 'silent' }, (v) => {
+  audioMode = v;
+  t.set('audio', audioMode, 'v-warn');
+  if (playing) startAudio();
+});
+button(controls, 'play', () => { startAudio(); if (!playing) start(); });
+button(controls, 'pause', () => { playing = false; audio.pause(); });
+button(controls, 'restart', () => { playing = false; audio.pause(); audio.currentTime = 0; start(); startAudio(); });
+start();
+
+notes.innerHTML = `
+  <p>The still frames of page 14, with the soundtrack switchable: <code>silent</code>
+     removes audio entirely, <code>independent</code> free-runs the tone (page 14's
+     behaviour), and <code>paired</code> holds the tone against the frame clock so
+     an audio+video pair moves together the way a real clip's tracks would.</p>
+  <p>Isolates recognition by the <em>A/V pair</em> rather than by the pixels or
+     the pipeline. If a control drops in <code>paired</code> but holds when
+     <code>silent</code>, it was keying on a synchronised soundtrack, not on the
+     picture. The frames never touch a media element in any mode, so the pipeline
+     page 14 avoids stays avoided throughout.</p>`;
+</script>
+</body>
+</html>
