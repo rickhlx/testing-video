@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<script type="module">
+import { scaffold, button, loadScript } from '/assets/scaffold.js';
+import { Telemetry, Rate, rateClass } from '/assets/telemetry.js';
+
+const { stage, controls, panel, notes } = scaffold('webgpu-external');
+
+// Page 09 uploaded a <video> frame into a WebGL texture. Page 10 fed WebCodecs
+// into a 2D canvas. This page joins the two ends the other pages leave apart:
+// WebCodecs decode with no <video> at all, rendered through WebGPU as an
+// external texture. It is the modern "video without any element the compositor
+// recognises" path. Bytes come from /raw as octet-stream, so nothing on the
+// wire announces video either; the only thing left for a control to recognise
+// is the decoded frame arriving at the GPU.
+const SRC = '/raw/h264-1080p24.mp4';
+const FPS = 24;
+
+const canvas = document.createElement('canvas');
+canvas.width = 1920; canvas.height = 1080;
+stage.append(canvas);
+
+const audio = document.createElement('audio');
+audio.src = '/media/audio.m4a';
+audio.preload = 'auto';
+
+const t = new Telemetry({ mount: panel, label: 'painted' });
+t.set('secure context', String(self.isSecureContext), self.isSecureContext ? 'v-ok' : 'v-bad');
+
+function bail(msg, extra) {
+  t.fail(msg);
+  if (extra) t.fail(extra);
+}
+
+if (!('gpu' in navigator)) {
+  bail('No WebGPU on this client (navigator.gpu missing).',
+    self.isSecureContext ? null : 'Not a secure context: serve with -tls, or use localhost.');
+  t.set('WebGPU', 'unavailable', 'v-bad');
+} else if (!('VideoDecoder' in self)) {
+  bail('No VideoDecoder on this client. WebCodecs is unavailable.');
+} else {
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) {
+    bail('navigator.gpu.requestAdapter() returned null: no usable GPU.');
+  } else {
+    const device = await adapter.requestDevice();
+    const gpuCtx = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    gpuCtx.configure({ device, format, alphaMode: 'opaque' });
+    t.set('WebGPU', 'ready', 'v-ok');
+    const info = adapter.info || {};
+    if (info.vendor || info.architecture) t.set('adapter', [info.vendor, info.architecture].filter(Boolean).join(' / '));
+
+    // Fullscreen triangle, sampling the decoded frame as an external texture.
+    // texture_external is the binding built for exactly this: a video frame the
+    // driver samples in place, without a copy into a normal texture.
+    const module = device.createShaderModule({
+      code: `
+        struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+        @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+          var p = array<vec2f,3>(vec2f(-1,-1), vec2f(3,-1), vec2f(-1,3));
+          var out: VSOut;
+          out.pos = vec4f(p[i], 0, 1);
+          out.uv = vec2f((p[i].x + 1) * 0.5, 1 - (p[i].y + 1) * 0.5);
+          return out;
+        }
+        @group(0) @binding(0) var s: sampler;
+        @group(0) @binding(1) var frame: texture_external;
+        @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+          return textureSampleBaseClampToEdge(frame, s, uv);
+        }`,
+    });
+    const pipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vs' },
+      fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+    const draw = (videoFrame) => {
+      // An external texture is valid only for the task that imported it, so it
+      // is imported and bound fresh every frame -- this is the intended usage,
+      // not a leak.
+      const external = device.importExternalTexture({ source: videoFrame });
+      const bind = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: sampler }, { binding: 1, resource: external }],
+      });
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginRenderPass({
+        colorAttachments: [{
+          view: gpuCtx.getCurrentTexture().createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store',
+        }],
+      });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bind);
+      pass.draw(3);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+    };
+
+    await loadScript('/vendor/mp4box.all.min.js');
+
+    const paintRate = new Rate();
+    let decoded = 0, painted = 0;
+    const queue = [];
+    let startedAt = null;
+
+    const present = () => {
+      if (startedAt === null && queue.length) startedAt = performance.now();
+      const elapsed = startedAt === null ? 0 : (performance.now() - startedAt) / 1000;
+      let frame = null;
+      while (queue.length && queue[0].timestamp / 1e6 <= elapsed) {
+        if (frame) frame.close();
+        frame = queue.shift();
+      }
+      if (frame) {
+        draw(frame);
+        frame.close();
+        painted++;
+        t.markFrame();
+        const fps = paintRate.sample(painted);
+        t.set('present fps', fps === null ? '--' : fps.toFixed(1), rateClass(fps));
+      }
+      t.set('queued frames', queue.length, queue.length > FPS ? 'v-warn' : 'v-ok');
+      requestAnimationFrame(present);
+    };
+    requestAnimationFrame(present);
+
+    const decoder = new VideoDecoder({
+      output: (frame) => { decoded++; t.set('frames decoded', decoded); queue.push(frame); },
+      error: (e) => t.fail(`decoder error: ${e.message}`),
+    });
+
+    const description = (file, track) => {
+      const trak = file.getTrackById(track.id);
+      for (const entry of trak.mdia.minf.stbl.stsd.entries) {
+        const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
+        if (!box) continue;
+        // This mp4box build exports DataStream as a bare global, not on MP4Box.
+        const DS = MP4Box.DataStream || DataStream;
+        const s = new DS(undefined, 0, DS.BIG_ENDIAN);
+        box.write(s);
+        return new Uint8Array(s.buffer, 8);
+      }
+      return undefined;
+    };
+
+    const file = MP4Box.createFile();
+    file.onError = (e) => t.fail(`demux error: ${e}`);
+    file.onReady = async (mi) => {
+      const track = mi.videoTracks[0];
+      const config = {
+        codec: track.codec,
+        codedWidth: track.video.width,
+        codedHeight: track.video.height,
+        description: description(file, track),
+      };
+      t.set('codec', track.codec);
+      const support = await VideoDecoder.isConfigSupported(config);
+      t.set('isConfigSupported', String(support.supported), support.supported ? 'v-ok' : 'v-bad');
+      if (!support.supported) { t.fail('Decoder rejected the configuration.'); return; }
+      decoder.configure(config);
+      t.log(`decoder configured for ${track.codec}`, 'good');
+      file.setExtractionOptions(track.id, null, { nbSamples: 24 });
+      file.start();
+    };
+    file.onSamples = (_id, _user, samples) => {
+      for (const s of samples) {
+        decoder.decode(new EncodedVideoChunk({
+          type: s.is_sync ? 'key' : 'delta',
+          timestamp: (s.cts * 1e6) / s.timescale,
+          duration: (s.duration * 1e6) / s.timescale,
+          data: s.data,
+        }));
+      }
+      t.set('decode queue', decoder.decodeQueueSize);
+    };
+
+    const buf = await (await fetch(SRC)).arrayBuffer();
+    buf.fileStart = 0;
+    file.appendBuffer(buf);
+    file.flush();
+    t.log(`demuxing ${(buf.byteLength / 1e6).toFixed(1)} MB`, 'good');
+  }
+}
+
+button(controls, 'play sound', () => audio.play().catch(() => t.log('press again for sound', 'err')));
+button(controls, 'pause sound', () => audio.pause());
+button(controls, 'reload', () => location.reload());
+
+notes.innerHTML = `
+  <p>WebCodecs decodes the clip with no <code>&lt;video&gt;</code> element, and
+     each <code>VideoFrame</code> is rendered through WebGPU as a
+     <code>texture_external</code> &mdash; sampled in place, not copied into a
+     normal texture. The bytes arrive from <code>/raw</code> as octet-stream.</p>
+  <p>This is the render surface pages 09 and 10 leave between them: a GPU path
+     fed by WebCodecs rather than a <code>&lt;video&gt;</code>. If a client drops
+     on 09 (WebGL from <code>&lt;video&gt;</code>) but holds here, the constraint
+     was the video-element-to-GL upload, not the GPU. If it holds on 10 (2D
+     canvas) but drops here, the WebGPU external-texture path is the constraint.</p>
+  <p>Needs WebGPU and a secure context. A client missing either reports it above
+     rather than showing a blank stage.</p>`;
+</script>
+</body>
+</html>

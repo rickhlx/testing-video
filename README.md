@@ -35,6 +35,10 @@ It needs `ffmpeg` with `libx264`, `libvpx-vp9` and `libsvtav1`.
 | 12 | Picture-in-Picture | A separate compositing surface |
 | 13 | Disguised bytes into `<video>` | A link that classifies traffic by type, not by decode |
 | 14 | Still-frame sequence on canvas | Whether anything downstream of decode is even a video |
+| 15 | Opaque bytes into WebCodecs | A link that inspects the payload for a video signature |
+| 16 | WebGPU external texture | The WebCodecs-to-GPU path, with no `<video>` element |
+| 17 | Jittered still-frame cadence | Recognition by the regular 24Hz video cadence |
+| 18 | Still frames with switchable audio | Recognition by a synchronised A/V pair, not the pixels |
 
 Excluded deliberately, because none of them carries 1080p24: animated GIF, APNG,
 animated WebP, animated AVIF, MJPEG in `<img>`, SVG `foreignObject`, and data
@@ -42,11 +46,13 @@ URIs.
 
 ## Red-team paths
 
-Pages 13 and 14 exist to answer a different question than the diagnostic dozen:
-if something upstream drops frames on purpose when it recognises video, where
-does that recognition actually live? They carry the same clip and the same
+Pages 13 through 18 exist to answer a different question than the diagnostic
+dozen: if something upstream drops frames on purpose when it recognises video,
+where does that recognition actually live? They carry the same clip and the same
 burned-in indicator, so a bypass is visible and counted exactly as everywhere
-else, and each probes one place the recognition could sit.
+else, and each probes one place the recognition could sit. Read down the list as
+a widening set of surfaces removed: the wire label, then the pipeline, then the
+payload bytes, then the render surface, then the cadence, then the soundtrack.
 
 - **13 disguises the bytes on the wire.** It is the same H.264 file as page 01,
   but pulled from `/raw`, which answers `application/octet-stream` with no media
@@ -63,11 +69,40 @@ else, and each probes one place the recognition could sit.
   runs on its own timer, decoupled from the paint clock, so a slow link starves
   the buffer honestly rather than the throttled rAF starving it artificially.
 
+- **15 disguises the bytes themselves, not just the label.** Page 13 changed
+  only the MIME on the wire; the payload was still a readable MP4. This serves the
+  same H.264 file XORed with a constant, so nothing on the wire matches an `ftyp`
+  box, a `moov` atom or an H.264 start code. The page XORs it back in memory,
+  demuxes with mp4box.js and decodes through WebCodecs with no `<video>` element.
+  A control that classifies traffic by inspecting the payload for a video
+  signature — not just its MIME or URL — has nothing to match; it extends page 13
+  the way 13 extended 01. The XOR is a single byte: it removes container
+  structure, it is not encryption.
+- **16 fills the render surface pages 09 and 10 leave apart.** WebCodecs decodes
+  the clip with no `<video>` element and each frame is rendered through WebGPU as
+  a `texture_external`, sampled in place. Page 09 uploads a `<video>` frame into
+  WebGL; page 10 paints WebCodecs into a 2D canvas; this is the third corner, a
+  GPU path fed by the decoder directly. It splits a client that stalls on the
+  video-element-to-GL upload from one that stalls on the GPU itself.
+- **17 removes the regular cadence.** A clean 24Hz paint grid is itself a signal.
+  This paints page 14's still frames off a jittered clock — each paint at the
+  nominal period plus bounded zero-mean noise — so inter-paint intervals scatter
+  while the average holds 24fps and no frame is dropped. If a control drops on 14
+  but holds here, it was locking to the cadence rather than watching the pixels.
+- **18 removes the soundtrack, or its pairing.** A synchronised audio+video pair
+  is a recognisable media signature on its own. This paints page 14's frames with
+  the audio switchable between none, an independent free-running tone, and a track
+  held in lockstep with the frame clock. A control that drops only when the pair
+  moves together was keying on the A/V correlation, not the picture.
+
 `/raw` serves the same files as `/media` with the same range support, only ever
-labelled `application/octet-stream`. The still frames are generated alongside the
-rest of the media (webp where ffmpeg has it, mjpeg otherwise) and add roughly
-their own clip's worth of egress — about 150 MB at the default 60s, so lower
-`DUR` if that matters for a fleet.
+labelled `application/octet-stream`. Pages 13, 15 and 16 pull from it so the wire
+never announces video. The still frames are generated alongside the rest of the
+media (webp where ffmpeg has it, mjpeg otherwise) and add roughly their own
+clip's worth of egress — about 150 MB at the default 60s, so lower `DUR` if that
+matters for a fleet. Page 15 also adds `h264-scrambled.bin`, one more copy of the
+H.264 file, so the red-team set costs roughly one extra clip's worth of image and
+one of video on top of the matrix.
 
 ### Testing page 14 against your own videos
 

@@ -170,6 +170,24 @@ if [ ! -f "$OUT/audio.m4a" ]; then
     -vn -c:a aac -b:a 128k -movflags +faststart "$OUT/audio.m4a"
 fi
 
+# ---------------------------------------------------------- scrambled h264 blob
+# The same H.264 bytes as h264-1080p24.mp4, XORed with a constant so nothing on
+# the wire matches an MP4 or H.264 signature -- no ftyp box, no NAL start codes,
+# no readable atom tree. Page 15 pulls this from /raw (octet-stream) and XORs it
+# back before demuxing, so a control that classifies traffic by inspecting the
+# payload for a video signature, not just its MIME or URL, has nothing to match.
+#
+# The key is a single byte: this is about defeating content *recognition*, not
+# providing confidentiality, and single-byte XOR is the cheapest transform that
+# still leaves zero container structure visible on the wire. perl (perl-base is
+# present on Debian and macOS) does the whole-file XOR; the .bin extension keeps
+# the server's MIME table from ever typing it as media even outside /raw.
+if [ ! -f "$OUT/h264-scrambled.bin" ] && [ -f "$OUT/h264-1080p24.mp4" ]; then
+  say "scrambled h264 blob (xor 0x5a)"
+  perl -0777 -ne 'print pack("C*", map { $_ ^ 0x5a } unpack("C*", $_))' \
+    < "$OUT/h264-1080p24.mp4" > "$OUT/h264-scrambled.bin"
+fi
+
 say "done"
 ls -lh "$OUT" | tail -n +2
 printf '\nhls: %s segments\ndash: %s segments\n' \
